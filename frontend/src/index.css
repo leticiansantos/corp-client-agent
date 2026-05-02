@@ -1,0 +1,44 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* Databricks brand */
+  --color-primary:       #FF3621;
+  --color-primary-hover: #E02E1A;
+
+  /* Neutral palette */
+  --color-navy:          #1B3139;
+  --color-navy-light:    #2D4A55;
+  --color-text:          #1B3139;
+  --color-text-muted:    #5A6F77;
+  --color-text-subtle:   #8FA4AC;
+
+  /* Backgrounds */
+  --color-bg:            #F7F8F8;
+  --color-surface:       #FFFFFF;
+
+  /* Borders */
+  --color-border:        #DCE0E2;
+  --color-border-light:  #EEF0F1;
+
+  /* Status */
+  --color-success:       #00A972;
+  --color-error:         #E5534B;
+  --color-warning:       #F5A623;
+}
+
+body {
+  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}

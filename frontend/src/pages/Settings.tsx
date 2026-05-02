@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import api from "../services/api";
 import "./Settings.css";
 
@@ -15,6 +15,32 @@ interface WorkspaceEnvConfig {
   notes: string;
   updated_at: string | null;
 }
+
+interface FrameworkEndpointStatus {
+  env: Env;
+  endpoint_name: string;
+  endpoint_url: string;
+  state: "READY" | "NOT_READY" | "NOT_FOUND" | "NOT_CONFIGURED" | "ERROR";
+  deploying: boolean;
+  deploy_step: string;
+  deploy_step_index: number;
+  deploy_error?: string;
+  error?: string;
+}
+
+const DEPLOY_STEPS = [
+  "Criar catalog",
+  "Criar schema",
+  "Criar tabela tools_config",
+  "Criar tabela agents_config",
+  "Criar volume para libs",
+  "Build WHL do corp_agent_framework",
+  "Upload WHL para Volume",
+  "Verificar endpoint existente",
+  "Upload notebook de deploy",
+  "Submeter job de deploy",
+  "Aguardar conclusão do deploy",
+];
 
 const ENV_META: Record<Env, { label: string; cloud: string; desc: string }> = {
   dev:     { label: "Dev",     cloud: "AWS",   desc: "Ambiente de desenvolvimento e sandbox" },
@@ -37,6 +63,7 @@ const EMPTY_ENV = (env: Env): WorkspaceEnvConfig => ({
 
 // ── Component ──────────────────────────────────────────────────
 export default function Settings() {
+  // Workspace config
   const [configs, setConfigs]     = useState<WorkspaceEnvConfig[]>(ENVS.map(EMPTY_ENV));
   const [loading, setLoading]     = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -44,6 +71,16 @@ export default function Settings() {
   const [saveOk, setSaveOk]       = useState("");
   const [saveError, setSaveError] = useState("");
 
+  // Framework endpoints
+  const [epStatus, setEpStatus] = useState<Record<Env, FrameworkEndpointStatus | null>>({
+    dev: null, staging: null, prod: null,
+  });
+  const [epLoading, setEpLoading]     = useState(true);
+  const [epError, setEpError]         = useState("");
+  const [epDeploying, setEpDeploying] = useState<Record<string, boolean>>({});
+  const epPollingRef                  = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Workspace config load ────────────────────────────────────
   useEffect(() => {
     api
       .get<{ envs: WorkspaceEnvConfig[] }>("/settings/workspaces")
@@ -59,6 +96,76 @@ export default function Settings() {
       .finally(() => setLoading(false));
   }, []);
 
+  // ── Framework endpoints ──────────────────────────────────────
+  function _applyEpResponse(endpoints: FrameworkEndpointStatus[]) {
+    const byEnv: Record<string, FrameworkEndpointStatus> = {};
+    for (const ep of endpoints) byEnv[ep.env] = ep;
+    setEpStatus({
+      dev:     (byEnv["dev"]     as FrameworkEndpointStatus) ?? null,
+      staging: (byEnv["staging"] as FrameworkEndpointStatus) ?? null,
+      prod:    (byEnv["prod"]    as FrameworkEndpointStatus) ?? null,
+    });
+    setEpDeploying({});
+    return endpoints.some((ep) => ep.deploying);
+  }
+
+  function loadFrameworkEndpoints() {
+    setEpLoading(true);
+    setEpError("");
+    api
+      .get<{ endpoints: FrameworkEndpointStatus[] }>("/settings/framework-endpoints")
+      .then((r) => {
+        const anyDeploying = _applyEpResponse(r.data.endpoints);
+        if (anyDeploying) _startEpPolling(); else _stopEpPolling();
+      })
+      .catch((err) => {
+        const detail = err?.response?.data?.detail ?? err?.message ?? "Erro desconhecido";
+        setEpError(`Erro ao carregar endpoints: ${detail}`);
+      })
+      .finally(() => setEpLoading(false));
+  }
+
+  function _startEpPolling() {
+    if (epPollingRef.current !== null) return;
+    epPollingRef.current = setInterval(() => {
+      api
+        .get<{ endpoints: FrameworkEndpointStatus[] }>("/settings/framework-endpoints")
+        .then((r) => {
+          const anyDeploying = _applyEpResponse(r.data.endpoints);
+          if (!anyDeploying) _stopEpPolling();
+        })
+        .catch(() => {/* keep polling */});
+    }, 10_000);
+  }
+
+  function _stopEpPolling() {
+    if (epPollingRef.current !== null) {
+      clearInterval(epPollingRef.current);
+      epPollingRef.current = null;
+    }
+  }
+
+  useEffect(() => {
+    loadFrameworkEndpoints();
+    return () => _stopEpPolling();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleFrameworkDeploy(env: Env) {
+    setEpDeploying((p) => ({ ...p, [env]: true }));
+    try {
+      await api.post(`/settings/framework-endpoints/${env}/deploy`);
+      _startEpPolling();
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Erro ao iniciar deploy.";
+      alert(detail);
+      setEpDeploying((p) => ({ ...p, [env]: false }));
+    }
+  }
+
+  // ── Workspace field update ───────────────────────────────────
   function updateField(env: Env, field: keyof WorkspaceEnvConfig, value: string) {
     setConfigs((prev) =>
       prev.map((c) => (c.env === env ? { ...c, [field]: value } : c))
@@ -84,9 +191,9 @@ export default function Settings() {
     }
   }
 
+  // ── Render ───────────────────────────────────────────────────
   return (
     <div className="st-shell">
-      {/* Header */}
       <div className="st-header">
         <div className="st-header-left">
           <h1 className="st-title">Configurações</h1>
@@ -95,6 +202,7 @@ export default function Settings() {
       </div>
 
       <div className="st-body">
+        {/* ── Workspace config ─────────────────────────────── */}
         {loading && <div className="st-state">Carregando configurações...</div>}
         {!loading && loadError && <div className="st-error-banner">{loadError}</div>}
 
@@ -227,6 +335,149 @@ export default function Settings() {
             </div>
           </form>
         )}
+
+        {/* ── Corp Agent Framework endpoints ───────────────── */}
+        <div className="st-section">
+          <div className="st-fw-header">
+            <div>
+              <h2 className="st-section-title">Corp Agent Framework</h2>
+              <p className="st-section-desc">
+                Endpoint do corp_agent_framework por ambiente. Faça o deploy para criar ou
+                atualizar o serving endpoint <code className="st-inline-code">corp-config-driven-agent-{"{env}"}</code> no
+                workspace correspondente.
+              </p>
+            </div>
+            <button
+              className="st-refresh-btn"
+              onClick={loadFrameworkEndpoints}
+              disabled={epLoading}
+              type="button"
+            >
+              {epLoading ? "Atualizando..." : "Atualizar"}
+            </button>
+          </div>
+
+          {epLoading && !Object.values(epStatus).some(Boolean) && (
+            <div className="st-state">Carregando status dos endpoints...</div>
+          )}
+          {epError && <div className="st-error-banner">{epError}</div>}
+
+          <div className="st-env-grid">
+            {ENVS.map((env) => {
+              const meta = ENV_META[env];
+              const ep   = epStatus[env];
+              const isDeploying    = !!epDeploying[env] || !!ep?.deploying;
+              const notConfigured  = ep?.state === "NOT_CONFIGURED";
+
+              return (
+                <div key={env} className={`st-fw-card st-env-${env}`}>
+                  {/* Card header */}
+                  <div className="st-env-card-header">
+                    <span className={`st-env-badge st-env-badge-${env}`}>{meta.label}</span>
+                    <span className={`st-cloud-badge st-cloud-${meta.cloud.toLowerCase()}`}>
+                      {meta.cloud}
+                    </span>
+                  </div>
+
+                  {/* Endpoint name */}
+                  <div className="st-fw-field">
+                    <span className="st-label">Endpoint</span>
+                    <code className="st-fw-code">corp-config-driven-agent-{env}</code>
+                  </div>
+
+                  {/* Invocation URL */}
+                  <div className="st-fw-field">
+                    <span className="st-label">URL de invocação</span>
+                    {ep?.endpoint_url ? (
+                      <a
+                        href={ep.endpoint_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="st-fw-url"
+                        title={ep.endpoint_url}
+                      >
+                        {ep.endpoint_url}
+                      </a>
+                    ) : (
+                      <span className="st-fw-url-empty">
+                        {notConfigured
+                          ? "Workspace não configurado"
+                          : ep
+                          ? "Endpoint não criado"
+                          : "—"}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Status badge */}
+                  <div className="st-fw-status-row">
+                    <span className="st-label">Status</span>
+                    <span className={`st-fw-badge st-fw-badge-${
+                      isDeploying              ? "deploying"
+                      : ep?.state === "READY"          ? "ready"
+                      : ep?.state === "NOT_READY"      ? "notready"
+                      : ep?.state === "NOT_FOUND"      ? "notfound"
+                      : ep?.state === "NOT_CONFIGURED" ? "notconfigured"
+                      : ep?.state === "ERROR"          ? "error"
+                      : "unknown"
+                    }`}>
+                      {isDeploying              ? "Deployando..."
+                        : ep?.state === "READY"          ? "Ready"
+                        : ep?.state === "NOT_READY"      ? "Not Ready"
+                        : ep?.state === "NOT_FOUND"      ? "Não criado"
+                        : ep?.state === "NOT_CONFIGURED" ? "Não configurado"
+                        : ep?.state === "ERROR"          ? "Erro"
+                        : "—"}
+                    </span>
+                  </div>
+
+                  {/* Error detail */}
+                  {ep?.state === "ERROR" && ep.error && (
+                    <span className="st-fw-error-msg">{ep.error}</span>
+                  )}
+
+                  {/* Deploy steps — shown only while deploying */}
+                  {isDeploying && (
+                    <div className="st-fw-steps">
+                      {DEPLOY_STEPS.map((label, idx) => {
+                        const currentIdx = ep?.deploy_step_index ?? 0;
+                        const s = idx < currentIdx ? "done" : idx === currentIdx ? "current" : "pending";
+                        return (
+                          <div key={idx} className={`st-fw-step st-fw-step--${s}`}>
+                            <span className="st-fw-step-icon">
+                              {s === "done" ? "✓" : s === "current" ? <span className="st-fw-step-spinner" /> : <span className="st-fw-step-dot" />}
+                            </span>
+                            <span className="st-fw-step-label">{label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Deploy error */}
+                  {!isDeploying && ep?.deploy_error && (
+                    <span className="st-fw-error-msg">{ep.deploy_error}</span>
+                  )}
+
+                  {/* Action */}
+                  {notConfigured ? (
+                    <span className="st-fw-not-configured">
+                      Configure o Workspace URL e Token acima para habilitar o deploy.
+                    </span>
+                  ) : !isDeploying && (
+                    <button
+                      className="st-fw-deploy-btn"
+                      type="button"
+                      onClick={() => handleFrameworkDeploy(env)}
+                    >
+                      {ep?.state === "READY" ? "Re-deploy" : ep?.deploy_error ? "Tentar novamente" : "Deploy"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
     </div>
   );

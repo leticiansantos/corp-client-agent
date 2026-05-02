@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     app_catalog: str = "leticia_santos_stable_catalog"
     app_schema: str = "corp_agent_client"
 
+    # Set to true when running locally to skip WHL rebuild if already in Volume
+    local_dev: bool = False
+
     @property
     def uc_prefix(self) -> str:
         return f"{self.app_catalog}.{self.app_schema}"

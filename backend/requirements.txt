@@ -4,3 +4,5 @@ uvicorn[standard]==0.30.6
 # databricks-sdk comes as a transitive dependency of corp-agent-framework
 pydantic-settings==2.4.0
 python-dotenv==1.0.1
+setuptools>=61.0
+wheel>=0.42.0

@@ -570,7 +570,7 @@ def _promote_genie_space(
     if src_catalog != target_catalog:
         serialized_space = serialized_space.replace(f"{src_catalog}.", f"{target_catalog}.")
 
-    _read_only = {"space_id", "id", "created_at", "updated_at", "creator", "owner"}
+    _read_only = {"space_id", "id", "created_at", "updated_at", "creator", "owner", "etag"}
     payload: dict = {k: v for k, v in space.items() if k not in _read_only}
     payload["warehouse_id"]     = target_warehouse
     payload["serialized_space"] = serialized_space

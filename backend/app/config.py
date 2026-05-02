@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     app_catalog: str = "leticia_santos_stable_catalog"
     app_schema: str = "corp_agent_client"
 
+    # Default catalog/schema for corp_agent_framework in each env workspace
+    framework_catalog: str = "corp_agent_framework"
+    framework_schema: str = "agents"
+
     # Set to true when running locally to skip WHL rebuild if already in Volume
     local_dev: bool = False
 

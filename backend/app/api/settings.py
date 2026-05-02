@@ -564,17 +564,21 @@ def save_workspace_envs(body: SaveWorkspaceEnvsRequest):
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Ambiente inválido: '{cfg.env}'. Aceitos: {', '.join(ENVS)}",
             )
+        # Apply defaults for catalog and schema_name when not explicitly set
+        effective_catalog     = cfg.catalog     or settings.framework_catalog
+        effective_schema_name = cfg.schema_name or settings.framework_schema
+
         _execute_sql(f"""
         MERGE INTO {_table()} AS target
         USING (
           SELECT
-            '{_esc(cfg.env)}'                         AS env,
-            '{_esc(cfg.workspace_url or "")}'         AS workspace_url,
-            '{_esc(cfg.catalog or "")}'               AS catalog,
-            '{_esc(cfg.schema_name or "")}'           AS schema_name,
-            '{_esc(cfg.warehouse_id or "")}'          AS warehouse_id,
-            '{_esc(cfg.token or "")}'                 AS token,
-            '{_esc(cfg.notes or "")}'                 AS notes
+            '{_esc(cfg.env)}'                             AS env,
+            '{_esc(cfg.workspace_url or "")}'             AS workspace_url,
+            '{_esc(effective_catalog)}'                   AS catalog,
+            '{_esc(effective_schema_name)}'               AS schema_name,
+            '{_esc(cfg.warehouse_id or "")}'              AS warehouse_id,
+            '{_esc(cfg.token or "")}'                     AS token,
+            '{_esc(cfg.notes or "")}'                     AS notes
         ) AS source
         ON target.env = source.env
         WHEN MATCHED THEN UPDATE SET

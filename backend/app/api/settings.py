@@ -721,3 +721,117 @@ def deploy_framework_endpoint(env: str):
     ).start()
 
     return {"env": env, "deploying": True}
+
+
+# ── Model approvals ───────────────────────────────────────────
+
+def _models_table() -> str:
+    return f"{settings.uc_prefix}.model_approvals"
+
+
+def _ensure_models_table() -> None:
+    _execute_sql(f"""
+    CREATE TABLE IF NOT EXISTS {_models_table()} (
+      model_name  STRING NOT NULL,
+      status      STRING,
+      notes       STRING,
+      updated_at  TIMESTAMP
+    )
+    USING DELTA
+    """)
+
+
+class PatchModelStatusRequest(BaseModel):
+    new_status: str   # approved | rejected | pending
+    notes: str = ""
+
+
+@router.get("/models")
+def list_models():
+    """
+    Returns serving endpoints from the dev workspace merged with approval status.
+    """
+    _ensure_models_table()
+
+    # Approval statuses from app workspace
+    response = _execute_sql(
+        f"SELECT model_name, status, notes, updated_at FROM {_models_table()}"
+    )
+    approvals = {r["model_name"]: r for r in _rows_to_dicts(response)}
+
+    # Collect endpoints from the dev workspace only
+    raw: list[dict] = []
+    seen: set[str] = set()
+
+    for env in ("dev",):
+        try:
+            env_cfg = _get_env_config_from_db(env)
+            if not env_cfg or not env_cfg.get("workspace_url") or not env_cfg.get("token"):
+                continue
+            w = _get_env_workspace_client(env_cfg)
+            for ep in w.serving_endpoints.list():
+                if not ep.name or ep.name in seen:
+                    continue
+                seen.add(ep.name)
+                config = ep.config
+                served = (
+                    (config.served_entities if config else None)
+                    or (config.served_models if config else None)
+                    or []
+                )
+                entity = served[0] if served else None
+                model_name = (
+                    getattr(entity, "entity_name", None)
+                    or getattr(entity, "model_name", None)
+                    or ""
+                ) if entity else ""
+                raw.append({
+                    "name": ep.name,
+                    "env": env,
+                    "state": str(ep.state.ready) if (ep.state and ep.state.ready) else "NOT_READY",
+                    "model_name": model_name,
+                    "creator": ep.creator or "",
+                })
+        except Exception:
+            continue
+
+    models = []
+    for ep in raw:
+        ap = approvals.get(ep["name"], {})
+        models.append({
+            **ep,
+            "approval_status": ap.get("status") or "pending",
+            "notes": ap.get("notes") or "",
+            "updated_at": ap.get("updated_at"),
+        })
+
+    return {"models": models}
+
+
+@router.patch("/models/{model_name:path}/status")
+def update_model_status(model_name: str, body: PatchModelStatusRequest):
+    """Approve or reject a serving endpoint for use in agent creation."""
+    allowed = {"approved", "rejected", "pending"}
+    if body.new_status not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Status inválido. Valores aceitos: {', '.join(sorted(allowed))}",
+        )
+    _ensure_models_table()
+    _execute_sql(f"""
+    MERGE INTO {_models_table()} AS target
+    USING (
+      SELECT
+        '{_esc(model_name)}'      AS model_name,
+        '{_esc(body.new_status)}' AS status,
+        '{_esc(body.notes)}'      AS notes
+    ) AS source
+    ON target.model_name = source.model_name
+    WHEN MATCHED THEN UPDATE SET
+      target.status     = source.status,
+      target.notes      = source.notes,
+      target.updated_at = current_timestamp()
+    WHEN NOT MATCHED THEN INSERT (model_name, status, notes, updated_at)
+    VALUES (source.model_name, source.status, source.notes, current_timestamp())
+    """)
+    return {"model_name": model_name, "status": body.new_status}

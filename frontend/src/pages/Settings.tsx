@@ -4,6 +4,18 @@ import "./Settings.css";
 
 // ── Types ──────────────────────────────────────────────────────
 type Env = "dev" | "staging" | "prod";
+type ModelApprovalStatus = "approved" | "rejected" | "pending";
+
+interface ModelEntry {
+  name: string;
+  env: Env;
+  state: string;
+  model_name: string;
+  creator: string;
+  approval_status: ModelApprovalStatus;
+  notes: string;
+  updated_at: string | null;
+}
 
 interface WorkspaceEnvConfig {
   env: Env;
@@ -88,6 +100,17 @@ export default function Settings() {
   const [epDeploying, setEpDeploying] = useState<Record<string, boolean>>({});
   const epPollingRef                  = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Models approval
+  const [models, setModels]               = useState<ModelEntry[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsError, setModelsError]     = useState("");
+  const [approving, setApproving]         = useState<Record<string, boolean>>({});
+  const [approveMsg, setApproveMsg]       = useState<Record<string, string>>({});
+  const [selected, setSelected]           = useState<Set<string>>(new Set());
+  const [bulkApproving, setBulkApproving] = useState(false);
+  const [modelsPage, setModelsPage]       = useState(1);
+  const PAGE_SIZE = 10;
+
   // ── Workspace config load ────────────────────────────────────
   useEffect(() => {
     api
@@ -171,6 +194,63 @@ export default function Settings() {
       alert(detail);
       setEpDeploying((p) => ({ ...p, [env]: false }));
     }
+  }
+
+  // ── Model approvals ─────────────────────────────────────────
+  function loadModels() {
+    setModelsLoading(true);
+    setModelsError("");
+    api
+      .get<{ models: ModelEntry[] }>("/settings/models")
+      .then((r) => { setModels(r.data.models); setModelsPage(1); })
+      .catch((err) => {
+        const detail = err?.response?.data?.detail ?? err?.message ?? "Erro desconhecido";
+        setModelsError(`Erro ao carregar modelos: ${detail}`);
+      })
+      .finally(() => setModelsLoading(false));
+  }
+
+  useEffect(loadModels, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function handleModelStatus(modelName: string, newStatus: ModelApprovalStatus) {
+    setApproving((p) => ({ ...p, [modelName]: true }));
+    setApproveMsg((m) => ({ ...m, [modelName]: "" }));
+    try {
+      await api.patch(`/settings/models/${encodeURIComponent(modelName)}/status`, { new_status: newStatus });
+      setModels((prev) => prev.map((m) => m.name === modelName ? { ...m, approval_status: newStatus } : m));
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Erro ao atualizar status.";
+      setApproveMsg((m) => ({ ...m, [modelName]: msg }));
+    } finally {
+      setApproving((p) => ({ ...p, [modelName]: false }));
+    }
+  }
+
+  function toggleSelect(name: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelected(selected.size === models.length ? new Set() : new Set(models.map((m) => m.name)));
+  }
+
+  async function handleBulkStatus(newStatus: ModelApprovalStatus) {
+    setBulkApproving(true);
+    await Promise.allSettled(
+      Array.from(selected).map((name) =>
+        api
+          .patch(`/settings/models/${encodeURIComponent(name)}/status`, { new_status: newStatus })
+          .then(() => setModels((prev) => prev.map((m) => m.name === name ? { ...m, approval_status: newStatus } : m)))
+      )
+    );
+    setSelected(new Set());
+    setBulkApproving(false);
   }
 
   // ── Workspace field update ───────────────────────────────────
@@ -493,6 +573,124 @@ export default function Settings() {
               );
             })}
           </div>
+        </div>
+
+        {/* ── Modelos Disponíveis ───────────────────────── */}
+        <div className="st-section">
+          <div className="st-models-header">
+            <div>
+              <h2 className="st-section-title">Modelos Disponíveis</h2>
+              <p className="st-section-desc">
+                Apenas modelos <strong>aprovados</strong> aparecem no formulário de criação de agentes.
+                Os endpoints são lidos em tempo real dos workspaces configurados.
+              </p>
+            </div>
+            <button className="st-refresh-btn" onClick={loadModels} disabled={modelsLoading} type="button">
+              {modelsLoading ? "Atualizando..." : "Atualizar"}
+            </button>
+          </div>
+
+          {modelsLoading && <div className="st-state">Carregando modelos...</div>}
+          {!modelsLoading && modelsError && <div className="st-error-banner">{modelsError}</div>}
+          {!modelsLoading && !modelsError && models.length === 0 && (
+            <div className="st-state">Nenhum endpoint de model serving encontrado nos workspaces configurados.</div>
+          )}
+          {!modelsLoading && !modelsError && models.length > 0 && (() => {
+            const totalPages = Math.ceil(models.length / PAGE_SIZE);
+            const pageModels = models.slice((modelsPage - 1) * PAGE_SIZE, modelsPage * PAGE_SIZE);
+            return (
+              <>
+                {selected.size > 0 && (
+                  <div className="st-bulk-bar">
+                    <span className="st-bulk-count">{selected.size} selecionado{selected.size !== 1 ? "s" : ""}</span>
+                    <button className="st-action-btn st-action-approve" disabled={bulkApproving} onClick={() => handleBulkStatus("approved")}>
+                      {bulkApproving ? "..." : "Aprovar selecionados"}
+                    </button>
+                    <button className="st-action-btn st-action-reject" disabled={bulkApproving} onClick={() => handleBulkStatus("rejected")}>
+                      {bulkApproving ? "..." : "Rejeitar selecionados"}
+                    </button>
+                    <button className="st-bulk-clear" onClick={() => setSelected(new Set())}>Limpar seleção</button>
+                  </div>
+                )}
+                <div className="st-models-table-wrap">
+                  <table className="st-models-table">
+                    <thead>
+                      <tr>
+                        <th className="st-col-check">
+                          <input type="checkbox" checked={selected.size === models.length && models.length > 0} onChange={toggleSelectAll} />
+                        </th>
+                        <th>Endpoint</th>
+                        <th>Ambiente</th>
+                        <th>Modelo base</th>
+                        <th>Estado</th>
+                        <th>Aprovação</th>
+                        <th>Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pageModels.map((m) => (
+                        <tr key={m.name} className={selected.has(m.name) ? "st-row-selected" : ""}>
+                          <td className="st-col-check">
+                            <input type="checkbox" checked={selected.has(m.name)} onChange={() => toggleSelect(m.name)} />
+                          </td>
+                          <td className="st-model-name">{m.name}</td>
+                          <td>
+                            <span className={`st-env-badge st-env-badge-${m.env}`}>{m.env}</span>
+                          </td>
+                          <td className="st-model-base">{m.model_name || "—"}</td>
+                          <td>
+                            <span className={`st-ep-state st-ep-${m.state === "READY" ? "ready" : "notready"}`}>
+                              {m.state}
+                            </span>
+                          </td>
+                          <td>
+                            <span className={`st-approval-badge st-approval-${m.approval_status}`}>
+                              {m.approval_status === "approved" ? "Aprovado"
+                                : m.approval_status === "rejected" ? "Rejeitado"
+                                : "Pendente"}
+                            </span>
+                          </td>
+                          <td className="st-model-actions">
+                            {approveMsg[m.name] ? (
+                              <span className="st-approve-err">{approveMsg[m.name]}</span>
+                            ) : (
+                              <>
+                                {m.approval_status !== "approved" && (
+                                  <button className="st-action-btn st-action-approve" disabled={!!approving[m.name]} onClick={() => handleModelStatus(m.name, "approved")}>
+                                    {approving[m.name] ? "..." : "Aprovar"}
+                                  </button>
+                                )}
+                                {m.approval_status !== "rejected" && (
+                                  <button className="st-action-btn st-action-reject" disabled={!!approving[m.name]} onClick={() => handleModelStatus(m.name, "rejected")}>
+                                    {approving[m.name] ? "..." : "Rejeitar"}
+                                  </button>
+                                )}
+                                {m.approval_status !== "pending" && (
+                                  <button className="st-action-btn st-action-pending" disabled={!!approving[m.name]} onClick={() => handleModelStatus(m.name, "pending")}>
+                                    {approving[m.name] ? "..." : "Resetar"}
+                                  </button>
+                                )}
+                              </>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {totalPages > 1 && (
+                  <div className="st-pagination">
+                    <button className="st-page-btn" disabled={modelsPage === 1} onClick={() => setModelsPage((p) => p - 1)}>‹ Anterior</button>
+                    <span className="st-page-info">
+                      Página {modelsPage} de {totalPages}
+                      <span className="st-page-total"> · {models.length} modelos</span>
+                    </span>
+                    <button className="st-page-btn" disabled={modelsPage === totalPages} onClick={() => setModelsPage((p) => p + 1)}>Próxima ›</button>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       </div>
     </div>

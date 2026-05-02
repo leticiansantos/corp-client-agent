@@ -508,3 +508,187 @@
 }
 
 .st-fw-deploy-btn:hover { opacity: 0.88; }
+
+/* ── Modelos Disponíveis ────────────────────────────────────── */
+
+.st-models-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.st-models-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.st-models-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.st-models-table th {
+  background: #F7F8F8;
+  padding: 10px 14px;
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.st-models-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #F0F1F2;
+  vertical-align: middle;
+}
+
+.st-models-table tr:last-child td { border-bottom: none; }
+.st-models-table tr:hover td { background: #FAFAFA; }
+
+.st-model-name {
+  font-weight: 600;
+  color: var(--color-navy);
+  font-family: monospace;
+  font-size: 0.82rem;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-model-base {
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-ep-state {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+.st-ep-ready    { background: #dcfce7; color: #15803d; }
+.st-ep-notready { background: #FEF3C7; color: #92400e; }
+
+.st-approval-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.st-approval-approved { background: #dcfce7; color: #15803d; }
+.st-approval-rejected { background: #FEE2E2; color: #B91C1C; }
+.st-approval-pending  { background: #F3F4F6; color: #6B7280; }
+
+.st-model-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.st-action-btn {
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1.5px solid;
+  background: transparent;
+  transition: background 0.12s;
+  white-space: nowrap;
+}
+.st-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.st-action-approve { border-color: #16a34a; color: #16a34a; }
+.st-action-approve:hover:not(:disabled) { background: #dcfce7; }
+
+.st-action-reject  { border-color: #dc2626; color: #dc2626; }
+.st-action-reject:hover:not(:disabled)  { background: #FEE2E2; }
+
+.st-action-pending { border-color: #9ca3af; color: #6B7280; }
+.st-action-pending:hover:not(:disabled) { background: #F3F4F6; }
+
+.st-approve-err {
+  font-size: 0.78rem;
+  color: #B91C1C;
+}
+
+.st-col-check {
+  width: 36px;
+  padding-left: 14px !important;
+  padding-right: 6px !important;
+}
+.st-col-check input[type="checkbox"] {
+  cursor: pointer;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--color-primary);
+}
+.st-row-selected td { background: #FFF5F3 !important; }
+
+.st-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: #FFF5F3;
+  border: 1px solid #FFCFC9;
+  border-radius: 8px;
+  margin-bottom: 10px;
+}
+.st-bulk-count {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-navy);
+  margin-right: 4px;
+}
+.st-bulk-clear {
+  background: none;
+  border: none;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+  margin-left: 4px;
+}
+.st-bulk-clear:hover { color: var(--color-navy); }
+
+.st-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 14px 0 2px;
+  flex-wrap: wrap;
+}
+.st-page-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 0.82rem;
+  color: var(--color-navy);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.st-page-btn:hover:not(:disabled) { background: #F7F8F8; }
+.st-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.st-page-info  { font-size: 0.82rem; color: var(--color-navy); white-space: nowrap; }
+.st-page-total { color: var(--color-text-muted); }

@@ -1,0 +1,294 @@
+/* ── Shell ─────────────────────────────────────────────────── */
+.st-shell {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 64px);
+  overflow: hidden;
+  background: #F7F8F8;
+}
+
+/* ── Header ────────────────────────────────────────────────── */
+.st-header {
+  display: flex;
+  align-items: center;
+  padding: 0 32px;
+  min-height: 64px;
+  background: #fff;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 4px 0;
+}
+
+.st-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin: 0 0 2px 0;
+}
+
+.st-subtitle {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+/* ── Body ──────────────────────────────────────────────────── */
+.st-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 32px 80px;
+}
+
+@media (max-width: 768px) {
+  .st-header { padding: 12px 16px; }
+  .st-body   { padding: 16px 16px 60px; }
+}
+
+@media (max-width: 480px) {
+  .st-header { padding: 10px 12px; }
+  .st-body   { padding: 12px 12px 60px; }
+}
+
+.st-state {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+  padding: 40px 0;
+  text-align: center;
+}
+
+.st-error-banner {
+  background: #FFF5F3;
+  border: 1px solid #FFCFC9;
+  border-radius: 6px;
+  color: #B91C1C;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  margin-bottom: 20px;
+}
+
+/* ── Section ───────────────────────────────────────────────── */
+.st-section {
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 28px;
+  margin-bottom: 24px;
+}
+
+@media (max-width: 768px) {
+  .st-section { padding: 16px; }
+}
+
+@media (max-width: 480px) {
+  .st-section { padding: 12px; border-radius: 8px; }
+}
+
+.st-section-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin: 0 0 6px 0;
+}
+
+.st-section-desc {
+  font-size: 0.83rem;
+  color: var(--color-text-muted);
+  margin: 0 0 24px 0;
+  line-height: 1.5;
+}
+
+/* ── Env grid ──────────────────────────────────────────────── */
+.st-env-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+@media (max-width: 1100px) {
+  .st-env-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 700px) {
+  .st-env-grid { grid-template-columns: 1fr; gap: 14px; }
+}
+
+/* ── Env card ──────────────────────────────────────────────── */
+.st-env-card {
+  border: 1.5px solid var(--color-border);
+  border-radius: 10px;
+  padding: 20px;
+  background: #FAFAFA;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.st-env-dev     { border-top: 3px solid #22c55e; }
+.st-env-staging { border-top: 3px solid #f59e0b; }
+.st-env-prod    { border-top: 3px solid #3b82f6; }
+
+.st-env-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Env badge */
+.st-env-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  border-radius: 20px;
+  text-transform: uppercase;
+}
+
+.st-env-badge-dev     { background: #dcfce7; color: #15803d; }
+.st-env-badge-staging { background: #fef3c7; color: #92400e; }
+.st-env-badge-prod    { background: #dbeafe; color: #1d4ed8; }
+
+/* Cloud badge */
+.st-cloud-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.st-cloud-aws   { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
+.st-cloud-gcp   { background: #fef9c3; color: #854d0e; border: 1px solid #fde047; }
+.st-cloud-azure { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+
+.st-env-card-desc {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+/* ── Fields ────────────────────────────────────────────────── */
+.st-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.st-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+@media (max-width: 480px) {
+  .st-field-row { grid-template-columns: 1fr; }
+}
+
+.st-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.st-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-navy);
+}
+
+.st-input {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.84rem;
+  color: var(--color-navy);
+  background: #fff;
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  transition: border-color 0.15s;
+}
+
+.st-input:focus {
+  border-color: #FF3621;
+  box-shadow: 0 0 0 2px rgba(255, 54, 33, 0.08);
+}
+
+.st-textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.84rem;
+  color: var(--color-navy);
+  background: #fff;
+  outline: none;
+  resize: vertical;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  transition: border-color 0.15s;
+}
+
+.st-textarea:focus {
+  border-color: #FF3621;
+  box-shadow: 0 0 0 2px rgba(255, 54, 33, 0.08);
+}
+
+.st-hint {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+}
+
+.st-updated-at {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  padding-top: 4px;
+}
+
+/* ── Footer ─────────────────────────────────────────────────── */
+.st-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  padding-top: 20px;
+  margin-top: 8px;
+  border-top: 1px solid var(--color-border);
+}
+
+@media (max-width: 480px) {
+  .st-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .st-save-btn { width: 100%; text-align: center; }
+}
+
+.st-save-ok {
+  font-size: 0.85rem;
+  color: #15803d;
+}
+
+.st-save-error {
+  font-size: 0.85rem;
+  color: #B91C1C;
+}
+
+.st-save-btn {
+  padding: 8px 22px;
+  background: #FF3621;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.st-save-btn:hover:not(:disabled) { opacity: 0.88; }
+.st-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }

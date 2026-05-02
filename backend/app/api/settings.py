@@ -42,6 +42,8 @@ _DEPLOY_STEP:     dict[str, str] = {}
 _DEPLOY_STEP_IDX: dict[str, int] = {}
 # Last deploy error per env (persists after deploy finishes for UI display)
 _DEPLOY_ERROR:    dict[str, str] = {}
+# Total number of deploy steps — must match DEPLOY_STEPS array in the frontend
+_DEPLOY_TOTAL_STEPS = 11
 
 
 # ── App settings table ─────────────────────────────────────────
@@ -230,7 +232,7 @@ mlflow.set_registry_uri("databricks-uc")
 _pkg_dir = os.path.dirname(corp_agent_framework.__file__)
 
 with mlflow.start_run(run_name=f"{{ENDPOINT_NAME}}-deploy"):
-    mlflow.pyfunc.log_model(
+    model_info = mlflow.pyfunc.log_model(
         artifact_path="agent",
         python_model=agent,
         code_paths=[_pkg_dir],
@@ -243,17 +245,25 @@ with mlflow.start_run(run_name=f"{{ENDPOINT_NAME}}-deploy"):
         registered_model_name=MODEL_NAME,
         resources=[],
     )
-    print(f"Model registered: {{MODEL_NAME}}")
+
+# Get registered version: prefer model_info, fall back to MLflow client query
+_reg_version = getattr(model_info, "registered_model_version", None)
+if _reg_version:
+    latest = str(_reg_version)
+else:
+    _client = mlflow.tracking.MlflowClient()
+    _versions = _client.search_model_versions(f"name='{{MODEL_NAME}}'")
+    latest = str(max(int(v.version) for v in _versions))
+print(f"Model registered: {{MODEL_NAME}} version {{latest}}")
 
 w = WorkspaceClient()
-latest = max(int(v.version) for v in w.model_versions.list(full_name=MODEL_NAME))
 
 ep_config = EndpointCoreConfigInput(
     served_entities=[
         ServedEntityInput(
             name=ENDPOINT_NAME,
             entity_name=MODEL_NAME,
-            entity_version=str(latest),
+            entity_version=latest,
             workload_size="Small",
             scale_to_zero_enabled=True,
         )
@@ -458,9 +468,13 @@ def _deploy_framework_background(env: str, env_cfg: dict) -> None:
             else:
                 raise ValueError("no UC-enabled running cluster")
         except Exception:
+            try:
+                node_type_id = w.clusters.select_node_type(local_disk=True)
+            except Exception:
+                node_type_id = "n2-standard-4"
             task_spec["new_cluster"] = {
                 "spark_version":      "16.0.x-scala2.12",
-                "node_type_id":       "i3.xlarge",
+                "node_type_id":       node_type_id,
                 "num_workers":        0,
                 "spark_conf":         {"spark.master": "local[*, 4]"},
                 "data_security_mode": "SINGLE_USER",
@@ -623,6 +637,10 @@ def get_framework_endpoints():
                 if is_deploying:
                     with _DEPLOYING_LOCK:
                         _DEPLOYING_ENVS.add(env)
+                    # Job detected externally (e.g. after server restart) — show last step
+                    if env not in _DEPLOY_STEP_IDX:
+                        _DEPLOY_STEP[env]     = "Aguardando conclusão do job de deploy..."
+                        _DEPLOY_STEP_IDX[env] = _DEPLOY_TOTAL_STEPS - 1
 
             workspace_url = env_cfg["workspace_url"].rstrip("/")
             endpoint_url  = (

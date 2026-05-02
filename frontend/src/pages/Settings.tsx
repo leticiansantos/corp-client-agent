@@ -42,11 +42,19 @@ const DEPLOY_STEPS = [
   "Aguardar conclusão do deploy",
 ];
 
-const ENV_META: Record<Env, { label: string; cloud: string; desc: string }> = {
-  dev:     { label: "Dev",     cloud: "AWS",   desc: "Ambiente de desenvolvimento e sandbox" },
-  staging: { label: "Staging", cloud: "GCP",   desc: "Ambiente de pré-produção e validação" },
-  prod:    { label: "Prod",    cloud: "Azure", desc: "Ambiente de produção corporativo" },
+const ENV_META: Record<Env, { label: string; desc: string }> = {
+  dev:     { label: "Dev",     desc: "Ambiente de desenvolvimento e sandbox" },
+  staging: { label: "Staging", desc: "Ambiente de pré-produção e validação" },
+  prod:    { label: "Prod",    desc: "Ambiente de produção corporativo" },
 };
+
+function detectCloud(url: string): { label: string; key: string } | null {
+  if (!url) return null;
+  if (url.includes("azuredatabricks.net")) return { label: "Azure", key: "azure" };
+  if (url.includes("gcp.databricks.com"))  return { label: "GCP",   key: "gcp"   };
+  if (url.includes("cloud.databricks.com")) return { label: "AWS",   key: "aws"   };
+  return null;
+}
 
 const ENVS: Env[] = ["dev", "staging", "prod"];
 
@@ -218,16 +226,19 @@ export default function Settings() {
 
               <div className="st-env-grid">
                 {configs.map((cfg) => {
-                  const meta = ENV_META[cfg.env as Env];
+                  const meta  = ENV_META[cfg.env as Env];
+                  const cloud = detectCloud(cfg.workspace_url);
                   return (
                     <div key={cfg.env} className={`st-env-card st-env-${cfg.env}`}>
                       <div className="st-env-card-header">
                         <span className={`st-env-badge st-env-badge-${cfg.env}`}>
                           {meta.label}
                         </span>
-                        <span className={`st-cloud-badge st-cloud-${meta.cloud.toLowerCase()}`}>
-                          {meta.cloud}
-                        </span>
+                        {cloud && (
+                          <span className={`st-cloud-badge st-cloud-${cloud.key}`}>
+                            {cloud.label}
+                          </span>
+                        )}
                         <span className="st-env-card-desc">{meta.desc}</span>
                       </div>
 
@@ -364,8 +375,10 @@ export default function Settings() {
 
           <div className="st-env-grid">
             {ENVS.map((env) => {
-              const meta = ENV_META[env];
-              const ep   = epStatus[env];
+              const meta  = ENV_META[env];
+              const ep    = epStatus[env];
+              const cfg   = configs.find((c) => c.env === env);
+              const cloud = detectCloud(cfg?.workspace_url ?? "");
               const isDeploying    = !!epDeploying[env] || !!ep?.deploying;
               const notConfigured  = ep?.state === "NOT_CONFIGURED";
 
@@ -374,9 +387,11 @@ export default function Settings() {
                   {/* Card header */}
                   <div className="st-env-card-header">
                     <span className={`st-env-badge st-env-badge-${env}`}>{meta.label}</span>
-                    <span className={`st-cloud-badge st-cloud-${meta.cloud.toLowerCase()}`}>
-                      {meta.cloud}
-                    </span>
+                    {cloud && (
+                      <span className={`st-cloud-badge st-cloud-${cloud.key}`}>
+                        {cloud.label}
+                      </span>
+                    )}
                   </div>
 
                   {/* Endpoint name */}
@@ -468,6 +483,7 @@ export default function Settings() {
                     <button
                       className="st-fw-deploy-btn"
                       type="button"
+                      disabled={epLoading || loading}
                       onClick={() => handleFrameworkDeploy(env)}
                     >
                       {ep?.state === "READY" ? "Re-deploy" : ep?.deploy_error ? "Tentar novamente" : "Deploy"}

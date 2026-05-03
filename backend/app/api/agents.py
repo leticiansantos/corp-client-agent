@@ -27,7 +27,17 @@ router = APIRouter(prefix="/api")
 
 ENVS = ("dev", "staging", "prod")
 
-VALID_STATUSES = {"draft", "evaluating", "qa", "approved", "deployed", "disabled"}
+VALID_STATUSES = {"active", "disabled"}
+
+# Virtual status is derived from the environment at read time.
+# The DB always stores 'active'; 'disabled' is the only real status change possible.
+_ENV_VIRTUAL_STATUS = {
+    "dev":     "draft",
+    "staging": "evaluating",
+    "prod":    "approved",
+}
+
+_ENV_NEXT = {"dev": "staging", "staging": "prod"}
 
 # Framework's existing schema uses 'name', not 'agent_name'.
 # We CREATE with 'name' so new tables match the framework convention.
@@ -54,17 +64,19 @@ _AGENTS_CONFIG_DDL = """
 
 # Columns that may be missing from older tables created by the framework
 _MIGRATIONS = [
-    "ADD COLUMN environment           STRING",
-    "ADD COLUMN runtime_mode          STRING",
-    "ADD COLUMN created_by            STRING",
-    "ADD COLUMN updated_at            TIMESTAMP",
-    "ADD COLUMN eval_profile          STRING",
-    "ADD COLUMN min_safety_score      DOUBLE",
-    "ADD COLUMN min_correctness_score DOUBLE",
+    "ADD COLUMN environment             STRING",
+    "ADD COLUMN runtime_mode            STRING",
+    "ADD COLUMN created_by              STRING",
+    "ADD COLUMN updated_at              TIMESTAMP",
+    "ADD COLUMN eval_profile            STRING",
+    "ADD COLUMN min_safety_score        DOUBLE",
+    "ADD COLUMN min_correctness_score   DOUBLE",
+    # Framework columns that may be missing on older tables
+    "ADD COLUMN serving_endpoint_name   STRING",
     # Extra columns our client layer adds
-    "ADD COLUMN agent_type       STRING",
-    "ADD COLUMN owner_principal  STRING",
-    "ADD COLUMN instructions     STRING",
+    "ADD COLUMN agent_type              STRING",
+    "ADD COLUMN owner_principal         STRING",
+    "ADD COLUMN instructions            STRING",
 ]
 
 
@@ -80,6 +92,12 @@ def _ensure_agents_table(w: WorkspaceClient, warehouse_id: str, prefix: str) -> 
             _sql(w, warehouse_id, f"ALTER TABLE {prefix}.agents_config {migration}")
         except Exception:
             pass  # column already exists → ok
+    # Migrate existing 'draft' agents to 'active' so the framework can load them
+    try:
+        _sql(w, warehouse_id,
+             f"UPDATE {prefix}.agents_config SET status = 'active' WHERE status = 'draft'")
+    except Exception:
+        pass
 
 
 def _find_agent(agent_id: str) -> tuple[WorkspaceClient, str, str, str] | None:
@@ -124,6 +142,7 @@ def list_agents():
                        instructions,
                        to_json(tools_enabled) AS tools_enabled,
                        model,
+                       serving_endpoint_name,
                        eval_profile,
                        min_safety_score,
                        min_correctness_score,
@@ -156,12 +175,18 @@ def list_agents():
                 row["tools_enabled"] = []
         elif te is None:
             row["tools_enabled"] = []
+        # Map environment to virtual status; keep 'disabled' as-is
+        if row.get("status") != "disabled":
+            row["status"] = _ENV_VIRTUAL_STATUS.get(row.get("environment", "dev"), "draft")
         agents.append(row)
 
     return {"agents": agents}
 
 
 # ── Register agent ────────────────────────────────────────────
+
+_FRAMEWORK_ENDPOINT = "corp-config-driven-agent-dev"
+
 
 class RegisterAgentRequest(BaseModel):
     agent_id: str
@@ -215,6 +240,7 @@ def register_agent(body: RegisterAgentRequest):
         '{_esc(body.instructions)}'    AS instructions,
         from_json('{tools_json}', 'array<string>') AS tools_enabled,
         '{_esc(body.model)}'           AS model,
+        '{_FRAMEWORK_ENDPOINT}'        AS serving_endpoint_name,
         '{_esc(body.eval_profile)}'    AS eval_profile,
         {min_safety}                   AS min_safety_score,
         {min_correct}                  AS min_correctness_score,
@@ -230,20 +256,24 @@ def register_agent(body: RegisterAgentRequest):
         instructions          = source.instructions,
         tools_enabled         = from_json('{tools_json}', 'array<string>'),
         model                 = source.model,
+        serving_endpoint_name = '{_FRAMEWORK_ENDPOINT}',
         eval_profile          = source.eval_profile,
         min_safety_score      = source.min_safety_score,
         min_correctness_score = source.min_correctness_score,
         runtime_mode          = source.runtime_mode,
+        status                = 'active',
         updated_at            = current_timestamp()
     WHEN NOT MATCHED THEN INSERT (
         agent_id, name, agent_type, owner_principal, description, instructions,
-        tools_enabled, model, eval_profile, min_safety_score, min_correctness_score,
+        tools_enabled, model, serving_endpoint_name, eval_profile,
+        min_safety_score, min_correctness_score,
         environment, status, runtime_mode, created_at, created_by, updated_at
     ) VALUES (
         source.agent_id, source.name, source.agent_type, source.owner_principal,
         source.description, source.instructions, source.tools_enabled, source.model,
-        source.eval_profile, source.min_safety_score, source.min_correctness_score,
-        'dev', 'draft', source.runtime_mode,
+        source.serving_endpoint_name, source.eval_profile,
+        source.min_safety_score, source.min_correctness_score,
+        'dev', 'active', source.runtime_mode,
         current_timestamp(), source.owner_principal, current_timestamp()
     )
     """)
@@ -260,6 +290,7 @@ class UpdateAgentRequest(BaseModel):
     instructions: str | None = None
     tools_enabled: list[str] | None = None
     model: str | None = None
+    serving_endpoint_name: str | None = None
     eval_profile: str | None = None
     min_safety_score: float | None = None
     min_correctness_score: float | None = None
@@ -290,6 +321,8 @@ def update_agent(agent_id: str, body: UpdateAgentRequest):
         updates.append(f"tools_enabled = from_json('{te_json}', 'array<string>')")
     if body.model is not None:
         updates.append(f"model = '{_esc(body.model)}'")
+    if body.serving_endpoint_name is not None:
+        updates.append(f"serving_endpoint_name = '{_esc(body.serving_endpoint_name)}'")
     if body.eval_profile is not None:
         updates.append(f"eval_profile = '{_esc(body.eval_profile)}'")
     if body.min_safety_score is not None:
@@ -328,6 +361,177 @@ def update_agent_status(agent_id: str, body: UpdateStatusRequest):
         WHERE agent_id = '{_esc(agent_id)}'
     """)
     return {"agent_id": agent_id, "new_status": body.new_status, "environment": env}
+
+
+# ── Promote agent ─────────────────────────────────────────────
+
+@router.post("/agents/{agent_id}/promote")
+def promote_agent(agent_id: str):
+    """Copy agent config to the next environment (dev→staging or staging→prod)."""
+    found = _find_agent(agent_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    w_src, wh_src, prefix_src, env_src = found
+
+    next_env = _ENV_NEXT.get(env_src)
+    if not next_env:
+        raise HTTPException(status_code=400, detail="Agente já está no ambiente prod.")
+
+    parts = _env_client(next_env)
+    if parts is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Ambiente '{next_env}' não configurado em Settings.",
+        )
+    w_dst, catalog_dst, schema_dst, wh_dst = parts
+    prefix_dst = f"{catalog_dst}.{schema_dst}"
+
+    resp = _sql(w_src, wh_src, f"""
+        SELECT name, agent_type, owner_principal, description, instructions,
+               to_json(tools_enabled) AS tools_enabled_json,
+               model, serving_endpoint_name, eval_profile,
+               min_safety_score, min_correctness_score, runtime_mode
+        FROM {prefix_src}.agents_config
+        WHERE agent_id = '{_esc(agent_id)}'
+        LIMIT 1
+    """)
+    rows = _rows_to_dicts(resp)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    row = rows[0]
+
+    _ensure_agents_table(w_dst, wh_dst, prefix_dst)
+
+    tools_json  = (row.get("tools_enabled_json") or "[]").replace("'", "\\'")
+    min_safety  = str(row["min_safety_score"])      if row.get("min_safety_score")      is not None else "NULL"
+    min_correct = str(row["min_correctness_score"]) if row.get("min_correctness_score") is not None else "NULL"
+    endpoint    = row.get("serving_endpoint_name") or _FRAMEWORK_ENDPOINT
+
+    _sql(w_dst, wh_dst, f"""
+    MERGE INTO {prefix_dst}.agents_config AS target
+    USING (
+      SELECT
+        '{_esc(agent_id)}'                      AS agent_id,
+        '{_esc(row.get("name",""))}'             AS name,
+        '{_esc(row.get("agent_type",""))}'       AS agent_type,
+        '{_esc(row.get("owner_principal",""))}'  AS owner_principal,
+        '{_esc(row.get("description",""))}'      AS description,
+        '{_esc(row.get("instructions",""))}'     AS instructions,
+        from_json('{tools_json}', 'array<string>') AS tools_enabled,
+        '{_esc(row.get("model",""))}'            AS model,
+        '{_esc(endpoint)}'                       AS serving_endpoint_name,
+        '{_esc(row.get("eval_profile",""))}'     AS eval_profile,
+        {min_safety}                             AS min_safety_score,
+        {min_correct}                            AS min_correctness_score,
+        '{_esc(row.get("runtime_mode",""))}'     AS runtime_mode
+    ) AS source
+    ON target.agent_id = source.agent_id
+    WHEN MATCHED THEN UPDATE SET
+        name                  = source.name,
+        agent_type            = source.agent_type,
+        owner_principal       = source.owner_principal,
+        description           = source.description,
+        instructions          = source.instructions,
+        tools_enabled         = source.tools_enabled,
+        model                 = source.model,
+        serving_endpoint_name = source.serving_endpoint_name,
+        eval_profile          = source.eval_profile,
+        min_safety_score      = source.min_safety_score,
+        min_correctness_score = source.min_correctness_score,
+        runtime_mode          = source.runtime_mode,
+        status                = 'active',
+        updated_at            = current_timestamp()
+    WHEN NOT MATCHED THEN INSERT (
+        agent_id, name, agent_type, owner_principal, description, instructions,
+        tools_enabled, model, serving_endpoint_name, eval_profile,
+        min_safety_score, min_correctness_score,
+        environment, status, runtime_mode, created_at, created_by, updated_at
+    ) VALUES (
+        source.agent_id, source.name, source.agent_type, source.owner_principal,
+        source.description, source.instructions, source.tools_enabled, source.model,
+        source.serving_endpoint_name, source.eval_profile,
+        source.min_safety_score, source.min_correctness_score,
+        '{next_env}', 'active', source.runtime_mode,
+        current_timestamp(), source.owner_principal, current_timestamp()
+    )
+    """)
+    return {"agent_id": agent_id, "promoted_to": next_env}
+
+
+# ── Chat with agent ───────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+
+
+@router.post("/agents/{agent_id}/chat")
+def chat_with_agent(agent_id: str, body: ChatRequest):
+    """
+    Send messages to the corp-agent-framework's serving endpoint for the agent's environment.
+
+    The framework deploys a single multi-tenant ConfigDrivenAgent endpoint per environment.
+    The specific agent is selected by passing agent_id in custom_inputs.
+    """
+    found = _find_agent(agent_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    w, warehouse_id, prefix, _ = found
+
+    resp = _sql(w, warehouse_id,
+        f"SELECT serving_endpoint_name FROM {prefix}.agents_config "
+        f"WHERE agent_id = '{_esc(agent_id)}' LIMIT 1")
+    rows = _rows_to_dicts(resp)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+
+    endpoint = (rows[0].get("serving_endpoint_name") or "").strip()
+    if not endpoint:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Agente não está associado a nenhum serving endpoint. "
+                "O campo 'serving_endpoint_name' precisa ser preenchido após o deploy do "
+                "corp-agent-framework neste ambiente."
+            ),
+        )
+
+    messages = [{"role": m.role, "content": m.content} for m in body.messages]
+
+    try:
+        result = w.api_client.do(
+            "POST",
+            f"/serving-endpoints/{endpoint}/invocations",
+            body={
+                "input": messages,
+                "custom_inputs": {"agent_id": agent_id},
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Erro ao chamar endpoint '{endpoint}': {exc}",
+        ) from exc
+
+    # Handle OpenAI-compatible response (most common from Databricks serving)
+    choices = result.get("choices") or []
+    if choices:
+        content = (choices[0].get("message") or {}).get("content") or ""
+        if content:
+            return {"reply": content}
+
+    # Handle ResponsesAgent output format
+    for item in (result.get("output") or []):
+        if isinstance(item, dict) and item.get("type") == "message":
+            for c in (item.get("content") or []):
+                if isinstance(c, dict) and c.get("type") == "output_text":
+                    return {"reply": c.get("text", "")}
+
+    return {"reply": str(result)}
 
 
 # ── Delete agent ──────────────────────────────────────────────

@@ -170,6 +170,12 @@ def _ensure_tools_table(w: WorkspaceClient, warehouse_id: str, prefix: str) -> N
             _sql(w, warehouse_id, stmt)
         except Exception:
             pass  # column already exists → ok
+    # Migrate existing 'pending_review' tools to 'active' so the framework can load them
+    try:
+        _sql(w, warehouse_id,
+             f"UPDATE {prefix}.tools_config SET status = 'active' WHERE status = 'pending_review'")
+    except Exception:
+        pass
 
 
 _ENV_RANK = {"dev": 0, "staging": 1, "prod": 2}
@@ -300,7 +306,7 @@ def register_tool(body: RegisterToolRequest):
         status, created_at, created_by
     ) VALUES (
         source.tool_name, source.kind, source.ref, source.description,
-        source.owner, 'dev', 'pending_review', current_timestamp(), source.owner
+        source.owner, 'dev', 'active', current_timestamp(), source.owner
     )
     """
     _sql(w, warehouse_id, merge_sql)
@@ -822,9 +828,9 @@ def promote_tool(tool_name: str, body: PromoteToolRequest):
         )
     """)
 
-    # 6. Remove tool from source env's tools_config
-    _sql(src_w, src_warehouse_id,
-         f"DELETE FROM {src_prefix}.tools_config WHERE tool_name = '{_esc(tool_name)}'")
+    # Tool stays in source env — promotion is a copy, not a move.
+    # dev → staging: tool exists in dev AND staging
+    # staging → prod: tool exists in dev, staging AND prod
 
     return {
         "tool_name": tool_name,

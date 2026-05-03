@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import api from "../services/api";
 import "./Agents.css";
 
@@ -15,6 +15,7 @@ interface Agent {
   instructions: string;
   tools_enabled: string[] | null;
   model: string;
+  serving_endpoint_name: string;
   eval_profile: string;
   min_safety_score: number | null;
   min_correctness_score: number | null;
@@ -49,18 +50,18 @@ interface NewAgentForm {
 }
 
 const EMPTY_FORM: NewAgentForm = {
-  agent_id:             "",
-  agent_name:           "",
-  agent_type:           "conversational",
-  owner_principal:      "",
-  description:          "",
-  instructions:         "",
-  tools_enabled:        [],
-  model:                "",
-  eval_profile:         "default_internal",
-  min_safety_score:     "",
+  agent_id:              "",
+  agent_name:            "",
+  agent_type:            "conversational",
+  owner_principal:       "",
+  description:           "",
+  instructions:          "",
+  tools_enabled:         [],
+  model:                 "",
+  eval_profile:          "default_internal",
+  min_safety_score:      "",
   min_correctness_score: "",
-  runtime_mode:         "config-driven-single-endpoint",
+  runtime_mode:          "config-driven-single-endpoint",
 };
 
 const AGENT_TYPE_LABELS: Record<AgentType, string> = {
@@ -79,23 +80,16 @@ const STATUS_LABELS: Record<AgentStatus, string> = {
   disabled:   "Desativado",
 };
 
-// Which next statuses an admin can set from the current one
-const STATUS_TRANSITIONS: Record<AgentStatus, { label: string; next: AgentStatus; variant: "promote" | "deploy" | "danger" }[]> = {
-  draft:      [],
-  evaluating: [
-    { label: "Mover para QA", next: "qa",    variant: "promote" },
-    { label: "Rejeitar",      next: "draft", variant: "danger"  },
-  ],
-  qa: [
-    { label: "Aprovar",  next: "approved", variant: "promote" },
-    { label: "Rejeitar", next: "draft",    variant: "danger"  },
-  ],
-  approved: [
-    { label: "Marcar como Deployed", next: "deployed", variant: "deploy" },
-    { label: "Desativar",            next: "disabled", variant: "danger" },
-  ],
-  deployed: [{ label: "Desativar", next: "disabled", variant: "danger" }],
-  disabled: [],
+// Status transitions: promote copies the agent to the next environment.
+// action="promote" → POST /agents/{id}/promote
+// action="disable" → PATCH /agents/{id}/status { new_status: "disabled" }
+const STATUS_TRANSITIONS: Record<AgentStatus, { label: string; next: AgentStatus; variant: "promote" | "deploy" | "danger"; action: "promote" | "disable" }[]> = {
+  draft:      [{ label: "Promover para Staging", next: "evaluating", variant: "promote", action: "promote" }],
+  evaluating: [{ label: "Promover para Prod",    next: "approved",   variant: "deploy",  action: "promote" }],
+  approved:   [],
+  deployed:   [],
+  qa:         [],
+  disabled:   [],
 };
 
 // ── Component ──────────────────────────────────────────────────
@@ -125,13 +119,22 @@ export default function Agents() {
   const [approvedModels, setApprovedModels]     = useState<{ name: string; model_name: string; state: string }[]>([]);
   const [modelsLoading, setModelsLoading]       = useState(false);
 
+  // Delete
+  const [deleting, setDeleting] = useState<Record<string, boolean>>({});
+
   // Admin actions
   const [promoting, setPromoting]   = useState<Record<string, boolean>>({});
   const [promoteMsg, setPromoteMsg] = useState<Record<string, string>>({});
 
-  // Approval modal
-  const [approvalModal, setApprovalModal] = useState<{ agent: Agent } | null>(null);
-  const [approvalNote, setApprovalNote]   = useState("");
+
+  // Chat modal
+  const [chatModal, setChatModal]         = useState<{ agent: Agent } | null>(null);
+  const [chatMessages, setChatMessages]   = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [chatInput, setChatInput]         = useState("");
+  const [chatLoading, setChatLoading]     = useState(false);
+  const [chatError, setChatError]         = useState("");
+  const chatEndRef  = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
   const firstInputRef = useRef<HTMLInputElement>(null);
 
@@ -248,18 +251,18 @@ export default function Agents() {
   function openEditModal(agent: Agent) {
     setEditingAgent(agent);
     setForm({
-      agent_id:             agent.agent_id,
-      agent_name:           agent.agent_name,
-      agent_type:           agent.agent_type,
-      owner_principal:      agent.owner_principal || "",
-      description:          agent.description || "",
-      instructions:         agent.instructions || "",
-      tools_enabled:        Array.isArray(agent.tools_enabled) ? agent.tools_enabled : [],
-      model:                agent.model || "",
-      eval_profile:         agent.eval_profile || "",
-      min_safety_score:     agent.min_safety_score != null ? String(agent.min_safety_score) : "",
+      agent_id:              agent.agent_id,
+      agent_name:            agent.agent_name,
+      agent_type:            agent.agent_type,
+      owner_principal:       agent.owner_principal || "",
+      description:           agent.description || "",
+      instructions:          agent.instructions || "",
+      tools_enabled:         Array.isArray(agent.tools_enabled) ? agent.tools_enabled : [],
+      model:        agent.model || "",
+      eval_profile: agent.eval_profile || "",
+      min_safety_score:      agent.min_safety_score != null ? String(agent.min_safety_score) : "",
       min_correctness_score: agent.min_correctness_score != null ? String(agent.min_correctness_score) : "",
-      runtime_mode:         agent.runtime_mode || "config-driven-single-endpoint",
+      runtime_mode:          agent.runtime_mode || "config-driven-single-endpoint",
     });
     setSaveError("");
     setSaveOk("");
@@ -285,25 +288,17 @@ export default function Agents() {
   }
 
   // ── Admin certification ───────────────────────────────────────
-  function openApprovalModal(agent: Agent) {
-    setApprovalNote("");
-    setApprovalModal({ agent });
-  }
-
-  async function confirmApproval() {
-    if (!approvalModal) return;
-    const { agent } = approvalModal;
-    setApprovalModal(null);
-    await handlePromote(agent.agent_id, "evaluating");
-  }
-
-  async function handlePromote(agent_id: string, new_status: AgentStatus) {
+  async function handlePromote(agent_id: string, next: AgentStatus, action: "promote" | "disable") {
     setPromoting((p) => ({ ...p, [agent_id]: true }));
     setPromoteMsg((m) => ({ ...m, [agent_id]: "" }));
     try {
-      await api.patch(`/agents/${encodeURIComponent(agent_id)}/status`, { new_status });
+      if (action === "promote") {
+        await api.post(`/agents/${encodeURIComponent(agent_id)}/promote`);
+      } else {
+        await api.patch(`/agents/${encodeURIComponent(agent_id)}/status`, { new_status: "disabled" });
+      }
       loadAgents();
-      setPromoteMsg((m) => ({ ...m, [agent_id]: `→ ${STATUS_LABELS[new_status]}` }));
+      setPromoteMsg((m) => ({ ...m, [agent_id]: `→ ${STATUS_LABELS[next]}` }));
       setTimeout(() => setPromoteMsg((m) => ({ ...m, [agent_id]: "" })), 3000);
     } catch (err: unknown) {
       const msg =
@@ -314,6 +309,63 @@ export default function Agents() {
       setPromoting((p) => ({ ...p, [agent_id]: false }));
     }
   }
+
+  // ── Delete ────────────────────────────────────────────────────
+  async function handleDelete(agent: Agent) {
+    if (!window.confirm(`Remover o agente "${agent.agent_name}" (${agent.agent_id})? Esta ação não pode ser desfeita.`)) return;
+    setDeleting((d) => ({ ...d, [agent.agent_id]: true }));
+    try {
+      await api.delete(`/agents/${encodeURIComponent(agent.agent_id)}`);
+      loadAgents();
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Erro ao remover agente.";
+      alert(msg);
+    } finally {
+      setDeleting((d) => ({ ...d, [agent.agent_id]: false }));
+    }
+  }
+
+  // ── Chat ──────────────────────────────────────────────────────
+  function openChatModal(agent: Agent) {
+    setChatModal({ agent });
+    setChatMessages([]);
+    setChatInput("");
+    setChatError("");
+  }
+
+  const sendChatMessage = useCallback(async () => {
+    if (!chatInput.trim() || !chatModal || chatLoading) return;
+    const userMsg = { role: "user" as const, content: chatInput.trim() };
+    const newMessages = [...chatMessages, userMsg];
+    setChatMessages(newMessages);
+    setChatInput("");
+    setChatLoading(true);
+    setChatError("");
+    try {
+      const res = await api.post<{ reply: string }>(
+        `/agents/${encodeURIComponent(chatModal.agent.agent_id)}/chat`,
+        { messages: newMessages },
+      );
+      setChatMessages((prev) => [...prev, { role: "assistant", content: res.data.reply }]);
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Erro ao chamar o agente.";
+      setChatError(msg);
+    } finally {
+      setChatLoading(false);
+    }
+  }, [chatInput, chatModal, chatLoading, chatMessages]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages, chatLoading]);
+
+  useEffect(() => {
+    if (chatModal) setTimeout(() => chatInputRef.current?.focus(), 50);
+  }, [chatModal]);
 
   // ── Render ────────────────────────────────────────────────────
   return (
@@ -438,20 +490,26 @@ export default function Agents() {
                     </td>
                     <td className="ag-col-owner">{a.owner_principal}</td>
                     <td className="ag-col-row-action">
-                      {a.status === "draft" && (
-                        <button
-                          className="ag-row-action-btn ag-row-request-eval"
-                          disabled={!!promoting[a.agent_id]}
-                          onClick={() => openApprovalModal(a)}
-                        >
-                          {promoting[a.agent_id] ? "..." : "Solicitar aprovação"}
-                        </button>
-                      )}
+                      <button
+                        className="ag-row-action-btn ag-row-chat"
+                        onClick={() => openChatModal(a)}
+                        title={a.serving_endpoint_name ? `Testar via ${a.serving_endpoint_name}` : "Testar agente"}
+                      >
+                        Testar
+                      </button>
                       <button
                         className={`ag-row-action-btn${a.status === "draft" ? " ag-row-edit" : " ag-row-view"}`}
                         onClick={() => openEditModal(a)}
                       >
                         {a.status === "draft" ? "Editar" : "Ver"}
+                      </button>
+                      <button
+                        className="ag-row-action-btn ag-row-delete"
+                        disabled={!!deleting[a.agent_id]}
+                        onClick={() => handleDelete(a)}
+                        title="Remover registro"
+                      >
+                        {deleting[a.agent_id] ? "..." : "Remover"}
                       </button>
                     </td>
                   </tr>
@@ -529,7 +587,7 @@ export default function Agents() {
                                     key={t.next}
                                     className={`ag-action-btn ag-action-${t.variant}`}
                                     disabled={!!promoting[a.agent_id]}
-                                    onClick={() => handlePromote(a.agent_id, t.next)}
+                                    onClick={() => handlePromote(a.agent_id, t.next, t.action)}
                                   >
                                     {promoting[a.agent_id] ? "..." : t.label}
                                   </button>
@@ -659,7 +717,7 @@ export default function Agents() {
                     </div>
 
                     <div className="ag-field">
-                      <label className="ag-label">Model (endpoint de serving)</label>
+                      <label className="ag-label">Model (LLM)</label>
                       {modelsLoading ? (
                         <div className="ag-tools-loading">Carregando endpoints aprovados...</div>
                       ) : approvedModels.length > 0 ? (
@@ -692,6 +750,7 @@ export default function Agents() {
                           : "Endpoints aprovados em Settings → Models."}
                       </span>
                     </div>
+
                   </div>
                 )}
 
@@ -793,45 +852,77 @@ export default function Agents() {
         );
       })()}
 
-      {/* ── Approval modal ── */}
-      {approvalModal && (
-        <div className="ag-overlay" onClick={() => setApprovalModal(null)}>
-          <div className="ag-modal ag-modal-sm" onClick={(e) => e.stopPropagation()}>
+      {/* ── Chat modal ── */}
+      {chatModal && (
+        <div className="ag-overlay" onClick={() => setChatModal(null)}>
+          <div className="ag-modal ag-chat-modal" onClick={(e) => e.stopPropagation()}>
             <div className="ag-modal-header">
-              <h2 className="ag-modal-title">Solicitar aprovação</h2>
-              <button className="ag-modal-close" onClick={() => setApprovalModal(null)} aria-label="Fechar">×</button>
-            </div>
-            <div className="ag-modal-body">
-              <p className="ag-approval-desc">
-                Você está solicitando a aprovação do agente{" "}
-                <strong>{approvalModal.agent.agent_name}</strong>.
-                O time de plataforma será notificado para revisar.
-              </p>
-              <div className="ag-field">
-                <label className="ag-label">Justificativa (opcional)</label>
-                <textarea
-                  className="ag-textarea"
-                  rows={3}
-                  placeholder="Descreva brevemente o motivo da promoção..."
-                  value={approvalNote}
-                  onChange={(e) => setApprovalNote(e.target.value)}
-                />
+              <div className="ag-modal-header-left">
+                <h2 className="ag-modal-title">{chatModal.agent.agent_name}</h2>
+                <span className={`ag-env-badge env-${chatModal.agent.environment}`}>
+                  {chatModal.agent.environment || "dev"}
+                </span>
+                {chatModal.agent.serving_endpoint_name && (
+                  <code className="ag-chat-model-label">{chatModal.agent.serving_endpoint_name}</code>
+                )}
               </div>
+              <button className="ag-modal-close" onClick={() => setChatModal(null)} aria-label="Fechar">×</button>
             </div>
-            <div className="ag-modal-footer">
-              <div className="ag-footer-nav" />
-              <div className="ag-footer-actions">
-                <button className="ag-cancel-btn" onClick={() => setApprovalModal(null)}>
-                  Cancelar
-                </button>
-                <button className="ag-submit-btn" onClick={confirmApproval}>
-                  Confirmar pedido
-                </button>
-              </div>
+
+            <div className="ag-chat-messages">
+              {chatMessages.length === 0 && !chatLoading && (
+                <div className="ag-chat-empty">
+                  Envie uma mensagem para testar o agente
+                </div>
+              )}
+              {chatMessages.map((msg, i) => (
+                <div key={i} className={`ag-chat-msg ag-chat-msg-${msg.role}`}>
+                  <span className="ag-chat-role-label">
+                    {msg.role === "user" ? "Você" : chatModal.agent.agent_name}
+                  </span>
+                  <div className="ag-chat-bubble">{msg.content}</div>
+                </div>
+              ))}
+              {chatLoading && (
+                <div className="ag-chat-typing">
+                  <span className="ag-chat-dots">•••</span>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            {chatError && (
+              <div className="ag-chat-error">{chatError}</div>
+            )}
+
+            <div className="ag-chat-input-wrap">
+              <textarea
+                ref={chatInputRef}
+                className="ag-chat-input"
+                placeholder="Digite sua mensagem..."
+                rows={1}
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void sendChatMessage();
+                  }
+                }}
+                disabled={chatLoading}
+              />
+              <button
+                className="ag-chat-send"
+                onClick={() => void sendChatMessage()}
+                disabled={chatLoading || !chatInput.trim()}
+              >
+                {chatLoading ? "..." : "Enviar"}
+              </button>
             </div>
           </div>
         </div>
       )}
+
     </div>
   );
 }

@@ -172,7 +172,8 @@ def _build_whl() -> str:
 # ── Deploy script generator ────────────────────────────────────
 
 def _generate_deploy_script(
-    catalog: str, schema: str, warehouse_id: str, environment: str
+    catalog: str, schema: str, warehouse_id: str, environment: str,
+    workspace_url: str = "", token: str = "",
 ) -> str:
     endpoint_name = ENDPOINT_NAME_TPL.format(env=environment)
     model_name    = f"{catalog}.{schema}.{_CORP_MODEL_SUFFIX}_{environment}"
@@ -266,6 +267,12 @@ ep_config = EndpointCoreConfigInput(
             entity_version=latest,
             workload_size="Small",
             scale_to_zero_enabled=True,
+            environment_vars={{
+                # Credentials so the serving container can call the SQL warehouse
+                # and read agents_config / tools_config at inference time.
+                "DATABRICKS_HOST":  "{workspace_url}",
+                "DATABRICKS_TOKEN": "{token}",
+            }},
         )
     ],
 )
@@ -423,18 +430,16 @@ def _deploy_framework_background(env: str, env_cfg: dict) -> None:
                     overwrite=True,
                 )
 
-        # 8. Check if endpoint already READY — no need to re-deploy
+        # 8. Check endpoint state (informational only — always proceed to deploy/update)
         _step("Verificando endpoint existente...")
-        try:
-            ep = w.serving_endpoints.get(name=endpoint_name)
-            if ep.state and "READY" in str(ep.state.ready).upper():
-                return
-        except Exception:
-            pass  # endpoint not found → proceed to deploy
 
         # 9. Upload deploy notebook
         _step("Carregando notebook de deploy...")
-        script        = _generate_deploy_script(catalog, schema, warehouse_id, env)
+        script        = _generate_deploy_script(
+            catalog, schema, warehouse_id, env,
+            workspace_url=env_cfg.get("workspace_url", ""),
+            token=env_cfg.get("token", ""),
+        )
         notebook_dir  = "/Shared/_corp_client_agent"
         notebook_path = f"{notebook_dir}/deploy_framework_{catalog}_{env}"
         w.api_client.do(

@@ -607,7 +607,7 @@ export default function Settings() {
                       {bulkApproving ? "..." : "Aprovar selecionados"}
                     </button>
                     <button className="st-action-btn st-action-reject" disabled={bulkApproving} onClick={() => handleBulkStatus("rejected")}>
-                      {bulkApproving ? "..." : "Rejeitar selecionados"}
+                      {bulkApproving ? "..." : "Bloquear selecionados"}
                     </button>
                     <button className="st-bulk-clear" onClick={() => setSelected(new Set())}>Limpar seleção</button>
                   </div>
@@ -646,7 +646,7 @@ export default function Settings() {
                           <td>
                             <span className={`st-approval-badge st-approval-${m.approval_status}`}>
                               {m.approval_status === "approved" ? "Aprovado"
-                                : m.approval_status === "rejected" ? "Rejeitado"
+                                : m.approval_status === "rejected" ? "Bloqueado"
                                 : "Pendente"}
                             </span>
                           </td>
@@ -662,7 +662,7 @@ export default function Settings() {
                                 )}
                                 {m.approval_status !== "rejected" && (
                                   <button className="st-action-btn st-action-reject" disabled={!!approving[m.name]} onClick={() => handleModelStatus(m.name, "rejected")}>
-                                    {approving[m.name] ? "..." : "Rejeitar"}
+                                    {approving[m.name] ? "..." : "Bloquear"}
                                   </button>
                                 )}
                                 {m.approval_status !== "pending" && (

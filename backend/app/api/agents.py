@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
 from app.api.db import _execute_sql, _rows_to_dicts, _esc
-from app.api.tools import _env_client, _get_env_config, _sql, _ENVS_DESC, _ENV_RANK
+from app.api.tools import _env_client, _get_env_config, _sql, _ENVS_DESC, _ENV_RANK, _ensure_tools_table
 from app.config import settings
 
 router = APIRouter(prefix="/api")
@@ -200,6 +200,13 @@ def list_agents():
 # ── Register agent ────────────────────────────────────────────
 
 _FRAMEWORK_ENDPOINT = "corp-config-driven-agent-dev"
+
+# Framework serving endpoint name per environment
+_ENV_FRAMEWORK_ENDPOINT = {
+    "dev":     "corp-config-driven-agent-dev",
+    "staging": "corp-config-driven-agent-staging",
+    "prod":    "corp-config-driven-agent",
+}
 
 
 class RegisterAgentRequest(BaseModel):
@@ -419,7 +426,8 @@ def promote_agent(agent_id: str):
     tools_json  = (row.get("tools_enabled_json") or "[]").replace("'", "\\'")
     min_safety  = str(row["min_safety_score"])      if row.get("min_safety_score")      is not None else "NULL"
     min_correct = str(row["min_correctness_score"]) if row.get("min_correctness_score") is not None else "NULL"
-    endpoint    = row.get("serving_endpoint_name") or _FRAMEWORK_ENDPOINT
+    # Always use the canonical framework endpoint for the destination environment
+    endpoint    = _ENV_FRAMEWORK_ENDPOINT.get(next_env, _FRAMEWORK_ENDPOINT)
 
     _sql(w_dst, wh_dst, f"""
     MERGE INTO {prefix_dst}.agents_config AS target
@@ -469,6 +477,62 @@ def promote_agent(agent_id: str):
         current_timestamp(), source.owner_principal, current_timestamp()
     )
     """)
+    # Copy tools used by this agent to the destination environment
+    try:
+        tools_list = json.loads(row.get("tools_enabled_json") or "[]")
+    except Exception:
+        tools_list = []
+
+    if tools_list:
+        try:
+            _ensure_tools_table(w_dst, wh_dst, prefix_dst)
+        except Exception:
+            pass
+        for tool_name in tools_list:
+            try:
+                tool_resp = _sql(w_src, wh_src, f"""
+                    SELECT tool_name, kind, ref, description, owner
+                    FROM {prefix_src}.tools_config
+                    WHERE tool_name = '{_esc(tool_name)}'
+                    LIMIT 1
+                """)
+                tool_rows = _rows_to_dicts(tool_resp)
+                if not tool_rows:
+                    continue
+                t = tool_rows[0]
+                t_ref  = _esc(t.get("ref") or "")
+                t_desc = _esc(t.get("description") or "")
+                t_owner = _esc(t.get("owner") or "")
+                _sql(w_dst, wh_dst, f"""
+                MERGE INTO {prefix_dst}.tools_config AS target
+                USING (
+                  SELECT
+                    '{_esc(tool_name)}'  AS tool_name,
+                    '{_esc(t.get("kind",""))}' AS kind,
+                    '{t_ref}'            AS ref,
+                    '{t_desc}'           AS description,
+                    '{t_owner}'          AS owner,
+                    '{next_env}'         AS environment
+                ) AS source
+                ON target.tool_name = source.tool_name
+                WHEN MATCHED THEN UPDATE SET
+                    kind        = source.kind,
+                    description = source.description,
+                    owner       = source.owner,
+                    environment = source.environment,
+                    status      = 'active',
+                    approved_at = current_timestamp()
+                WHEN NOT MATCHED THEN INSERT (
+                    tool_name, kind, ref, description, owner,
+                    environment, status, created_at
+                ) VALUES (
+                    source.tool_name, source.kind, source.ref, source.description, source.owner,
+                    source.environment, 'active', current_timestamp()
+                )
+                """)
+            except Exception:
+                pass  # non-critical: tool may not exist in source or schema differs
+
     # Clear approval_requested in source env after promote
     try:
         _sql(w_src, wh_src, f"""
@@ -479,7 +543,7 @@ def promote_agent(agent_id: str):
     except Exception:
         pass  # non-critical
 
-    return {"agent_id": agent_id, "promoted_to": next_env}
+    return {"agent_id": agent_id, "promoted_to": next_env, "tools_promoted": tools_list}
 
 
 # ── Approval workflow ─────────────────────────────────────────

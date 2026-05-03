@@ -640,7 +640,7 @@ export default function Agents() {
                                   disabled={!!reviewingApproval[a.agent_id]}
                                   onClick={() => handleReviewApproval(a.agent_id, "approve")}
                                 >
-                                  {reviewingApproval[a.agent_id] ? "..." : "Aprovar"}
+                                  {reviewingApproval[a.agent_id] ? "..." : "Promover para Staging"}
                                 </button>
                                 <button
                                   className="ag-action-btn ag-action-danger"

@@ -77,6 +77,8 @@ _MIGRATIONS = [
     "ADD COLUMN agent_type              STRING",
     "ADD COLUMN owner_principal         STRING",
     "ADD COLUMN instructions            STRING",
+    # Approval workflow
+    "ADD COLUMN approval_requested      BOOLEAN",
 ]
 
 
@@ -132,6 +134,12 @@ def list_agents():
         w, catalog, schema_name, warehouse_id = parts
         prefix = f"{catalog}.{schema_name}"
         rank = _ENV_RANK.get(env, 0)
+        # Ensure approval_requested column exists before querying
+        try:
+            _sql(w, warehouse_id,
+                 f"ALTER TABLE {prefix}.agents_config ADD COLUMN approval_requested BOOLEAN")
+        except Exception:
+            pass  # column already exists or table doesn't exist yet
         try:
             resp = _sql(w, warehouse_id, f"""
                 SELECT agent_id,
@@ -149,6 +157,7 @@ def list_agents():
                        environment,
                        status,
                        runtime_mode,
+                       approval_requested,
                        created_at,
                        updated_at
                 FROM {prefix}.agents_config
@@ -177,7 +186,12 @@ def list_agents():
             row["tools_enabled"] = []
         # Map environment to virtual status; keep 'disabled' as-is
         if row.get("status") != "disabled":
-            row["status"] = _ENV_VIRTUAL_STATUS.get(row.get("environment", "dev"), "draft")
+            env = row.get("environment", "dev")
+            approval_req = row.get("approval_requested")
+            if env == "dev" and approval_req in (True, "true", 1, "1"):
+                row["status"] = "pending_approval"
+            else:
+                row["status"] = _ENV_VIRTUAL_STATUS.get(env, "draft")
         agents.append(row)
 
     return {"agents": agents}
@@ -455,7 +469,51 @@ def promote_agent(agent_id: str):
         current_timestamp(), source.owner_principal, current_timestamp()
     )
     """)
+    # Clear approval_requested in source env after promote
+    try:
+        _sql(w_src, wh_src, f"""
+            UPDATE {prefix_src}.agents_config
+            SET approval_requested = false, updated_at = current_timestamp()
+            WHERE agent_id = '{_esc(agent_id)}'
+        """)
+    except Exception:
+        pass  # non-critical
+
     return {"agent_id": agent_id, "promoted_to": next_env}
+
+
+# ── Approval workflow ─────────────────────────────────────────
+
+@router.post("/agents/{agent_id}/request-approval")
+def request_approval(agent_id: str):
+    """Mark an agent as pending approval review (dev only)."""
+    found = _find_agent(agent_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    w, warehouse_id, prefix, env = found
+    if env != "dev":
+        raise HTTPException(status_code=400, detail="Apenas agentes dev podem solicitar aprovação.")
+    _sql(w, warehouse_id, f"""
+        UPDATE {prefix}.agents_config
+        SET approval_requested = true, updated_at = current_timestamp()
+        WHERE agent_id = '{_esc(agent_id)}'
+    """)
+    return {"agent_id": agent_id, "approval_requested": True}
+
+
+@router.post("/agents/{agent_id}/reject-approval")
+def reject_approval(agent_id: str):
+    """Reject an approval request, returning agent to draft state."""
+    found = _find_agent(agent_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    w, warehouse_id, prefix, _ = found
+    _sql(w, warehouse_id, f"""
+        UPDATE {prefix}.agents_config
+        SET approval_requested = false, updated_at = current_timestamp()
+        WHERE agent_id = '{_esc(agent_id)}'
+    """)
+    return {"agent_id": agent_id, "approval_requested": False}
 
 
 # ── Chat with agent ───────────────────────────────────────────

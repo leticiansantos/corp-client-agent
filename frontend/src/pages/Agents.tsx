@@ -3,7 +3,7 @@ import api from "../services/api";
 import "./Agents.css";
 
 // ── Types ──────────────────────────────────────────────────────
-type AgentStatus = "draft" | "evaluating" | "qa" | "approved" | "deployed" | "disabled";
+type AgentStatus = "draft" | "pending_approval" | "evaluating" | "qa" | "approved" | "deployed" | "disabled";
 type AgentType   = "qa_docs" | "data_assistant" | "conversational" | "mixed";
 
 interface Agent {
@@ -72,24 +72,25 @@ const AGENT_TYPE_LABELS: Record<AgentType, string> = {
 };
 
 const STATUS_LABELS: Record<AgentStatus, string> = {
-  draft:      "Draft",
-  evaluating: "Em Avaliação",
-  qa:         "Em QA",
-  approved:   "Aprovado",
-  deployed:   "Deployed",
-  disabled:   "Desativado",
+  draft:            "Draft",
+  pending_approval: "Aguardando Aprovação",
+  evaluating:       "Em Avaliação",
+  qa:               "Em QA",
+  approved:         "Aprovado",
+  deployed:         "Deployed",
+  disabled:         "Desativado",
 };
 
-// Status transitions: promote copies the agent to the next environment.
+// Status transitions for the admin certification table (non-pending agents)
 // action="promote" → POST /agents/{id}/promote
-// action="disable" → PATCH /agents/{id}/status { new_status: "disabled" }
-const STATUS_TRANSITIONS: Record<AgentStatus, { label: string; next: AgentStatus; variant: "promote" | "deploy" | "danger"; action: "promote" | "disable" }[]> = {
-  draft:      [{ label: "Promover para Staging", next: "evaluating", variant: "promote", action: "promote" }],
-  evaluating: [{ label: "Promover para Prod",    next: "approved",   variant: "deploy",  action: "promote" }],
-  approved:   [],
-  deployed:   [],
-  qa:         [],
-  disabled:   [],
+const STATUS_TRANSITIONS: Record<AgentStatus, { label: string; next: AgentStatus; variant: "promote" | "deploy" | "danger"; action: "promote" }[]> = {
+  draft:            [],
+  pending_approval: [],
+  evaluating:       [{ label: "Promover para Prod", next: "approved", variant: "deploy", action: "promote" }],
+  approved:         [],
+  deployed:         [],
+  qa:               [],
+  disabled:         [],
 };
 
 // ── Component ──────────────────────────────────────────────────
@@ -125,6 +126,14 @@ export default function Agents() {
   // Admin actions
   const [promoting, setPromoting]   = useState<Record<string, boolean>>({});
   const [promoteMsg, setPromoteMsg] = useState<Record<string, string>>({});
+
+  // Approval request (domain team)
+  const [requesting, setRequesting]   = useState<Record<string, boolean>>({});
+  const [requestMsg, setRequestMsg]   = useState<Record<string, string>>({});
+
+  // Admin approval review
+  const [reviewingApproval, setReviewingApproval] = useState<Record<string, boolean>>({});
+  const [reviewMsg, setReviewMsg]                 = useState<Record<string, string>>({});
 
 
   // Chat modal
@@ -200,7 +209,7 @@ export default function Agents() {
     return matchSearch && matchStatus;
   });
 
-  const pendingAgents = agents.filter((a) => a.status === "evaluating" || a.status === "qa");
+  const pendingAgents = agents.filter((a) => a.status === "pending_approval");
 
   // ── Create / Save ─────────────────────────────────────────────
   async function handleSave(e: React.FormEvent) {
@@ -307,6 +316,48 @@ export default function Agents() {
       setPromoteMsg((m) => ({ ...m, [agent_id]: `Erro: ${msg}` }));
     } finally {
       setPromoting((p) => ({ ...p, [agent_id]: false }));
+    }
+  }
+
+  // ── Request approval (domain team) ───────────────────────────
+  async function handleRequestApproval(agent_id: string) {
+    setRequesting((r) => ({ ...r, [agent_id]: true }));
+    setRequestMsg((m) => ({ ...m, [agent_id]: "" }));
+    try {
+      await api.post(`/agents/${encodeURIComponent(agent_id)}/request-approval`);
+      loadAgents();
+      setRequestMsg((m) => ({ ...m, [agent_id]: "Solicitação enviada" }));
+      setTimeout(() => setRequestMsg((m) => ({ ...m, [agent_id]: "" })), 3000);
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Erro ao solicitar aprovação.";
+      setRequestMsg((m) => ({ ...m, [agent_id]: `Erro: ${msg}` }));
+    } finally {
+      setRequesting((r) => ({ ...r, [agent_id]: false }));
+    }
+  }
+
+  // ── Admin: approve / reject request ──────────────────────────
+  async function handleReviewApproval(agent_id: string, action: "approve" | "reject") {
+    setReviewingApproval((r) => ({ ...r, [agent_id]: true }));
+    setReviewMsg((m) => ({ ...m, [agent_id]: "" }));
+    try {
+      if (action === "approve") {
+        await api.post(`/agents/${encodeURIComponent(agent_id)}/promote`);
+      } else {
+        await api.post(`/agents/${encodeURIComponent(agent_id)}/reject-approval`);
+      }
+      loadAgents();
+      setReviewMsg((m) => ({ ...m, [agent_id]: action === "approve" ? "→ Promovido para Staging" : "Solicitação rejeitada" }));
+      setTimeout(() => setReviewMsg((m) => ({ ...m, [agent_id]: "" })), 3000);
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Erro ao processar aprovação.";
+      setReviewMsg((m) => ({ ...m, [agent_id]: `Erro: ${msg}` }));
+    } finally {
+      setReviewingApproval((r) => ({ ...r, [agent_id]: false }));
     }
   }
 
@@ -497,6 +548,22 @@ export default function Agents() {
                       >
                         Testar
                       </button>
+                      {a.status === "draft" && (
+                        requestMsg[a.agent_id] ? (
+                          <span className={requestMsg[a.agent_id].startsWith("Erro") ? "ag-row-msg ag-row-msg-err" : "ag-row-msg ag-row-msg-ok"}>
+                            {requestMsg[a.agent_id]}
+                          </span>
+                        ) : (
+                          <button
+                            className="ag-row-action-btn ag-row-request-eval"
+                            disabled={!!requesting[a.agent_id]}
+                            onClick={() => handleRequestApproval(a.agent_id)}
+                            title="Solicitar aprovação para staging"
+                          >
+                            {requesting[a.agent_id] ? "..." : "Solicitar Aprovação"}
+                          </button>
+                        )
+                      )}
                       <button
                         className={`ag-row-action-btn${a.status === "draft" ? " ag-row-edit" : " ag-row-view"}`}
                         onClick={() => openEditModal(a)}
@@ -519,43 +586,37 @@ export default function Agents() {
           </div>
         )}
 
-        {/* Admin tab — certification only */}
+        {/* Admin tab */}
         {activeTab === "admin" && !loading && !error && (
           <>
-            <div className="ag-admin-header">
-              <h2 className="ag-admin-title">Certificação de Agentes</h2>
-              <p className="ag-admin-subtitle">
-                <span className="ag-flow-step">Draft</span>
-                {" → "}
-                <span className="ag-flow-step evaluating">Em Avaliação</span>
-                {" → "}
-                <span className="ag-flow-step qa">Em QA</span>
-                {" → "}
-                <span className="ag-flow-step approved">Aprovado</span>
-                {" → "}
-                <span className="ag-flow-step deployed">Deployed</span>
-              </p>
-            </div>
-
-            {agents.filter((a) => a.status !== "disabled").length === 0 ? (
-              <div className="ag-state">Nenhum agente ativo para gerenciar.</div>
-            ) : (
-              <div className="ag-table-wrap">
-                <table className="ag-table">
-                  <thead>
-                    <tr>
-                      <th>Nome</th>
-                      <th>Tipo</th>
-                      <th>Status atual</th>
-                      <th>Env</th>
-                      <th>Owner</th>
-                      <th>Ações</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {agents
-                      .filter((a) => a.status !== "disabled")
-                      .map((a) => (
+            {/* ── Pedidos Pendentes de Aprovação ── */}
+            <div className="ag-admin-section">
+              <div className="ag-admin-section-header">
+                <h2 className="ag-admin-title">
+                  Pedidos Pendentes de Aprovação
+                  {pendingAgents.length > 0 && (
+                    <span className="ag-admin-count-badge">{pendingAgents.length}</span>
+                  )}
+                </h2>
+                <p className="ag-admin-subtitle">
+                  Times de domínio solicitaram aprovação para promover estes agentes ao ambiente staging.
+                </p>
+              </div>
+              {pendingAgents.length === 0 ? (
+                <div className="ag-state ag-state-inline">Nenhum pedido pendente.</div>
+              ) : (
+                <div className="ag-table-wrap">
+                  <table className="ag-table">
+                    <thead>
+                      <tr>
+                        <th>Nome</th>
+                        <th>Tipo</th>
+                        <th>Owner</th>
+                        <th>Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pendingAgents.map((a) => (
                         <tr key={a.agent_id}>
                           <td className="ag-col-name">
                             <span className="ag-agent-name">{a.agent_name}</span>
@@ -566,44 +627,118 @@ export default function Agents() {
                               {AGENT_TYPE_LABELS[a.agent_type] ?? a.agent_type}
                             </span>
                           </td>
-                          <td>
-                            <span className={`ag-status-badge status-${a.status}`}>
-                              {STATUS_LABELS[a.status] ?? a.status}
-                            </span>
-                          </td>
-                          <td>
-                            <span className={`ag-env-badge env-${a.environment}`}>{a.environment || "—"}</span>
-                          </td>
                           <td className="ag-col-owner">{a.owner_principal}</td>
                           <td className="ag-col-actions">
-                            {promoteMsg[a.agent_id] ? (
-                              <span className={promoteMsg[a.agent_id].startsWith("Erro") ? "ag-promote-msg ag-promote-err" : "ag-promote-msg ag-promote-ok"}>
-                                {promoteMsg[a.agent_id]}
+                            {reviewMsg[a.agent_id] ? (
+                              <span className={reviewMsg[a.agent_id].startsWith("Erro") ? "ag-promote-msg ag-promote-err" : "ag-promote-msg ag-promote-ok"}>
+                                {reviewMsg[a.agent_id]}
                               </span>
                             ) : (
                               <div className="ag-action-btns">
-                                {STATUS_TRANSITIONS[a.status]?.map((t) => (
-                                  <button
-                                    key={t.next}
-                                    className={`ag-action-btn ag-action-${t.variant}`}
-                                    disabled={!!promoting[a.agent_id]}
-                                    onClick={() => handlePromote(a.agent_id, t.next, t.action)}
-                                  >
-                                    {promoting[a.agent_id] ? "..." : t.label}
-                                  </button>
-                                ))}
-                                {STATUS_TRANSITIONS[a.status]?.length === 0 && (
-                                  <span className="ag-no-actions">—</span>
-                                )}
+                                <button
+                                  className="ag-action-btn ag-action-approve-req"
+                                  disabled={!!reviewingApproval[a.agent_id]}
+                                  onClick={() => handleReviewApproval(a.agent_id, "approve")}
+                                >
+                                  {reviewingApproval[a.agent_id] ? "..." : "Aprovar"}
+                                </button>
+                                <button
+                                  className="ag-action-btn ag-action-danger"
+                                  disabled={!!reviewingApproval[a.agent_id]}
+                                  onClick={() => handleReviewApproval(a.agent_id, "reject")}
+                                >
+                                  {reviewingApproval[a.agent_id] ? "..." : "Rejeitar"}
+                                </button>
                               </div>
                             )}
                           </td>
                         </tr>
                       ))}
-                  </tbody>
-                </table>
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* ── Certificação de Agentes ── */}
+            <div className="ag-admin-section">
+              <div className="ag-admin-section-header">
+                <h2 className="ag-admin-title">Certificação de Agentes</h2>
+                <p className="ag-admin-subtitle">
+                  <span className="ag-flow-step evaluating">Em Avaliação</span>
+                  {" → "}
+                  <span className="ag-flow-step approved">Aprovado</span>
+                </p>
               </div>
-            )}
+
+              {agents.filter((a) => a.status === "evaluating").length === 0 ? (
+                <div className="ag-state ag-state-inline">Nenhum agente em avaliação no momento.</div>
+              ) : (
+                <div className="ag-table-wrap">
+                  <table className="ag-table">
+                    <thead>
+                      <tr>
+                        <th>Nome</th>
+                        <th>Tipo</th>
+                        <th>Status atual</th>
+                        <th>Env</th>
+                        <th>Owner</th>
+                        <th>Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {agents
+                        .filter((a) => a.status === "evaluating")
+                        .map((a) => (
+                          <tr key={a.agent_id}>
+                            <td className="ag-col-name">
+                              <span className="ag-agent-name">{a.agent_name}</span>
+                              <code className="ag-agent-id">{a.agent_id}</code>
+                            </td>
+                            <td>
+                              <span className={`ag-badge type-${a.agent_type}`}>
+                                {AGENT_TYPE_LABELS[a.agent_type] ?? a.agent_type}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={`ag-status-badge status-${a.status}`}>
+                                {STATUS_LABELS[a.status] ?? a.status}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={`ag-env-badge env-${a.environment}`}>{a.environment || "—"}</span>
+                            </td>
+                            <td className="ag-col-owner">{a.owner_principal}</td>
+                            <td className="ag-col-actions">
+                              {promoteMsg[a.agent_id] ? (
+                                <span className={promoteMsg[a.agent_id].startsWith("Erro") ? "ag-promote-msg ag-promote-err" : "ag-promote-msg ag-promote-ok"}>
+                                  {promoteMsg[a.agent_id]}
+                                </span>
+                              ) : (
+                                <div className="ag-action-btns">
+                                  {STATUS_TRANSITIONS[a.status]?.map((t) => (
+                                    <button
+                                      key={t.next}
+                                      className={`ag-action-btn ag-action-${t.variant}`}
+                                      disabled={!!promoting[a.agent_id]}
+                                      onClick={() => handlePromote(a.agent_id, t.next, t.action)}
+                                    >
+                                      {promoting[a.agent_id] ? "..." : t.label}
+                                    </button>
+                                  ))}
+                                  {STATUS_TRANSITIONS[a.status]?.length === 0 && (
+                                    <span className="ag-no-actions">—</span>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </>
         )}
       </div>

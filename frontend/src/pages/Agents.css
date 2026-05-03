@@ -263,8 +263,9 @@
   white-space: nowrap;
 }
 
-.status-draft      { background: #F1F5F9; color: #475569; }
-.status-evaluating { background: #FEF9C3; color: #92400E; }
+.status-draft             { background: #F1F5F9; color: #475569; }
+.status-pending_approval  { background: #FEF3C7; color: #92400E; border: 1px solid #F59E0B; }
+.status-evaluating        { background: #FEF9C3; color: #92400E; }
 .status-qa         { background: #EDE9FE; color: #6D28D9; }
 .status-approved   { background: #DCFCE7; color: #166534; }
 .status-deployed   { background: #DBEAFE; color: #1E40AF; }
@@ -284,6 +285,14 @@
 .ag-env-badge.env-prod    { background: #DCFCE7; color: #166534; }
 
 /* ── Admin section ─────────────────────────────────────────── */
+.ag-admin-section {
+  margin-bottom: 32px;
+}
+
+.ag-admin-section-header {
+  margin-bottom: 14px;
+}
+
 .ag-admin-header {
   margin-bottom: 20px;
 }
@@ -340,6 +349,9 @@
 
 .ag-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.ag-action-approve-req { background: #DCFCE7; color: #166534; }
+.ag-action-approve-req:hover:not(:disabled) { background: #BBF7D0; }
+
 .ag-action-promote { background: #DCFCE7; color: #166534; }
 .ag-action-promote:hover:not(:disabled) { background: #BBF7D0; }
 
@@ -384,8 +396,35 @@
 .ag-row-view { color: var(--color-text-muted); }
 .ag-row-view:hover { background: #F7F8F8; }
 
-.ag-row-request-eval { border-color: #1b6ef3; color: #1b6ef3; }
-.ag-row-request-eval:hover { background: #EEF4FF; }
+.ag-row-request-eval { border-color: #D97706; color: #D97706; }
+.ag-row-request-eval:hover { background: #FFFBEB; }
+.ag-row-request-eval:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.ag-row-msg { font-size: 0.75rem; font-weight: 500; white-space: nowrap; }
+.ag-row-msg-ok  { color: #166534; }
+.ag-row-msg-err { color: #991B1B; }
+
+.ag-admin-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #F59E0B;
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  border-radius: 10px;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.ag-state-inline {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  padding: 10px 0;
+}
 
 /* ── Modal overlay ─────────────────────────────────────────── */
 .ag-overlay {

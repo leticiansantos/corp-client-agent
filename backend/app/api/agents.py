@@ -656,6 +656,106 @@ def chat_with_agent(agent_id: str, body: ChatRequest):
     return {"reply": str(result)}
 
 
+# ── Eval dataset ──────────────────────────────────────────────
+
+_EVAL_DATASET_DDL = """
+    CREATE TABLE IF NOT EXISTS {prefix}.eval_datasets (
+        id                 STRING NOT NULL,
+        agent_id           STRING NOT NULL,
+        request            STRING NOT NULL,
+        expected_response  STRING NOT NULL,
+        created_at         TIMESTAMP
+    )
+    USING DELTA
+    COMMENT 'Eval dataset entries for agent testing.'
+"""
+
+
+def _ensure_eval_dataset_table(w: WorkspaceClient, warehouse_id: str, prefix: str) -> None:
+    try:
+        _sql(w, warehouse_id, f"CREATE SCHEMA IF NOT EXISTS {prefix}")
+    except Exception:
+        pass
+    try:
+        _sql(w, warehouse_id, _EVAL_DATASET_DDL.format(prefix=prefix))
+    except Exception:
+        pass
+
+
+class EvalEntryBody(BaseModel):
+    request: str
+    expected_response: str
+
+
+@router.get("/agents/{agent_id}/eval-dataset")
+def list_eval_dataset(agent_id: str):
+    parts = _env_client("dev")
+    if parts is None:
+        raise HTTPException(status_code=503, detail="Dev workspace não configurado.")
+    w, catalog, schema_name, warehouse_id = parts
+    prefix = f"{catalog}.{schema_name}"
+    _ensure_eval_dataset_table(w, warehouse_id, prefix)
+    resp = _sql(w, warehouse_id, f"""
+        SELECT id, agent_id, request, expected_response, created_at
+        FROM {prefix}.eval_datasets
+        WHERE agent_id = '{_esc(agent_id)}'
+        ORDER BY created_at ASC
+    """)
+    return {"entries": _rows_to_dicts(resp)}
+
+
+@router.post("/agents/{agent_id}/eval-dataset", status_code=status.HTTP_201_CREATED)
+def add_eval_entry(agent_id: str, body: EvalEntryBody):
+    import uuid as _uuid
+    parts = _env_client("dev")
+    if parts is None:
+        raise HTTPException(status_code=503, detail="Dev workspace não configurado.")
+    w, catalog, schema_name, warehouse_id = parts
+    prefix = f"{catalog}.{schema_name}"
+    _ensure_eval_dataset_table(w, warehouse_id, prefix)
+    entry_id = str(_uuid.uuid4())
+    _sql(w, warehouse_id, f"""
+        INSERT INTO {prefix}.eval_datasets (id, agent_id, request, expected_response, created_at)
+        VALUES (
+            '{entry_id}',
+            '{_esc(agent_id)}',
+            '{_esc(body.request)}',
+            '{_esc(body.expected_response)}',
+            current_timestamp()
+        )
+    """)
+    return {"id": entry_id, "agent_id": agent_id, "request": body.request, "expected_response": body.expected_response}
+
+
+@router.put("/agents/{agent_id}/eval-dataset/{entry_id}")
+def update_eval_entry(agent_id: str, entry_id: str, body: EvalEntryBody):
+    parts = _env_client("dev")
+    if parts is None:
+        raise HTTPException(status_code=503, detail="Dev workspace não configurado.")
+    w, catalog, schema_name, warehouse_id = parts
+    prefix = f"{catalog}.{schema_name}"
+    _sql(w, warehouse_id, f"""
+        UPDATE {prefix}.eval_datasets
+        SET request = '{_esc(body.request)}',
+            expected_response = '{_esc(body.expected_response)}'
+        WHERE id = '{_esc(entry_id)}' AND agent_id = '{_esc(agent_id)}'
+    """)
+    return {"id": entry_id, "agent_id": agent_id}
+
+
+@router.delete("/agents/{agent_id}/eval-dataset/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_eval_entry(agent_id: str, entry_id: str):
+    parts = _env_client("dev")
+    if parts is None:
+        raise HTTPException(status_code=503, detail="Dev workspace não configurado.")
+    w, catalog, schema_name, warehouse_id = parts
+    prefix = f"{catalog}.{schema_name}"
+    _sql(w, warehouse_id, f"""
+        DELETE FROM {prefix}.eval_datasets
+        WHERE id = '{_esc(entry_id)}' AND agent_id = '{_esc(agent_id)}'
+    """)
+
+
 # ── Delete agent ──────────────────────────────────────────────
 
 @router.delete("/agents/{agent_id}")

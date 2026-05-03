@@ -34,6 +34,14 @@ interface ActiveTool {
   environment: string;
 }
 
+interface EvalEntry {
+  id: string;
+  agent_id: string;
+  request: string;
+  expected_response: string;
+  created_at: string;
+}
+
 interface NewAgentForm {
   agent_id: string;
   agent_name: string;
@@ -109,7 +117,19 @@ export default function Agents() {
   const [saving, setSaving]             = useState(false);
   const [saveError, setSaveError]       = useState("");
   const [saveOk, setSaveOk]             = useState("");
-  const [formTab, setFormTab]           = useState<"basic" | "prompt">("basic");
+  const [formTab, setFormTab]           = useState<"basic" | "prompt" | "eval">("basic");
+
+  // Eval dataset
+  const [evalEntries, setEvalEntries]       = useState<EvalEntry[]>([]);
+  const [evalLoading, setEvalLoading]       = useState(false);
+  const [evalError, setEvalError]           = useState("");
+  const [evalAdding, setEvalAdding]         = useState(false);
+  const [evalAddForm, setEvalAddForm]       = useState({ request: "", expected_response: "" });
+  const [evalAddSaving, setEvalAddSaving]   = useState(false);
+  const [evalEditingId, setEvalEditingId]   = useState<string | null>(null);
+  const [evalEditForm, setEvalEditForm]     = useState({ request: "", expected_response: "" });
+  const [evalEditSaving, setEvalEditSaving] = useState(false);
+  const [evalDeletingId, setEvalDeletingId] = useState<string | null>(null);
 
   // Active tools for multi-select
   const [activeTools, setActiveTools]   = useState<ActiveTool[]>([]);
@@ -128,8 +148,9 @@ export default function Agents() {
   const [promoteMsg, setPromoteMsg] = useState<Record<string, string>>({});
 
   // Approval request (domain team)
-  const [requesting, setRequesting]   = useState<Record<string, boolean>>({});
-  const [requestMsg, setRequestMsg]   = useState<Record<string, string>>({});
+  const [requesting, setRequesting]         = useState<Record<string, boolean>>({});
+  const [requestMsg, setRequestMsg]         = useState<Record<string, string>>({});
+  const [evalWarningAgentId, setEvalWarningAgentId] = useState<string | null>(null);
 
   // Admin approval review
   const [reviewingApproval, setReviewingApproval] = useState<Record<string, boolean>>({});
@@ -197,6 +218,20 @@ export default function Agents() {
     if (showModal) setTimeout(() => firstInputRef.current?.focus(), 50);
   }, [showModal]);
 
+  useEffect(() => {
+    if (formTab !== "eval" || !editingAgent) return;
+    setEvalLoading(true);
+    setEvalError("");
+    api
+      .get<{ entries: EvalEntry[] }>(`/agents/${encodeURIComponent(editingAgent.agent_id)}/eval-dataset`)
+      .then((r) => setEvalEntries(r.data.entries))
+      .catch((err) => {
+        const detail = err?.response?.data?.detail ?? err?.message ?? "Erro";
+        setEvalError(`Erro ao carregar dataset: ${detail}`);
+      })
+      .finally(() => setEvalLoading(false));
+  }, [formTab, editingAgent?.agent_id]);
+
   // ── Filters ───────────────────────────────────────────────────
   const filtered = agents.filter((a) => {
     const q = search.toLowerCase();
@@ -245,6 +280,14 @@ export default function Agents() {
     }
   }
 
+  function _resetEvalState() {
+    setEvalEntries([]);
+    setEvalError("");
+    setEvalAdding(false);
+    setEvalAddForm({ request: "", expected_response: "" });
+    setEvalEditingId(null);
+  }
+
   function openModal() {
     setEditingAgent(null);
     setForm(EMPTY_FORM);
@@ -254,10 +297,11 @@ export default function Agents() {
     setActiveTools([]);
     setToolsError("");
     setApprovedModels([]);
+    _resetEvalState();
     setShowModal(true);
   }
 
-  function openEditModal(agent: Agent) {
+  function openEditModal(agent: Agent, tab: "basic" | "prompt" | "eval" = "basic") {
     setEditingAgent(agent);
     setForm({
       agent_id:              agent.agent_id,
@@ -275,10 +319,11 @@ export default function Agents() {
     });
     setSaveError("");
     setSaveOk("");
-    setFormTab("basic");
+    setFormTab(tab);
     setActiveTools([]);
     setToolsError("");
     setApprovedModels([]);
+    _resetEvalState();
     setShowModal(true);
   }
 
@@ -294,6 +339,62 @@ export default function Agents() {
         ? prev.tools_enabled.filter((t) => t !== name)
         : [...prev.tools_enabled, name],
     }));
+  }
+
+  // ── Eval dataset CRUD ─────────────────────────────────────────
+  async function handleEvalAdd() {
+    if (!editingAgent || !evalAddForm.request.trim() || !evalAddForm.expected_response.trim()) return;
+    setEvalAddSaving(true);
+    try {
+      const r = await api.post<EvalEntry>(
+        `/agents/${encodeURIComponent(editingAgent.agent_id)}/eval-dataset`,
+        evalAddForm,
+      );
+      setEvalEntries((prev) => [...prev, r.data]);
+      setEvalAddForm({ request: "", expected_response: "" });
+      setEvalAdding(false);
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Erro ao adicionar.";
+      setEvalError(detail);
+    } finally {
+      setEvalAddSaving(false);
+    }
+  }
+
+  async function handleEvalUpdate(entry_id: string) {
+    if (!editingAgent || !evalEditForm.request.trim() || !evalEditForm.expected_response.trim()) return;
+    setEvalEditSaving(true);
+    try {
+      await api.put(
+        `/agents/${encodeURIComponent(editingAgent.agent_id)}/eval-dataset/${entry_id}`,
+        evalEditForm,
+      );
+      setEvalEntries((prev) =>
+        prev.map((e) => (e.id === entry_id ? { ...e, ...evalEditForm } : e))
+      );
+      setEvalEditingId(null);
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Erro ao salvar.";
+      setEvalError(detail);
+    } finally {
+      setEvalEditSaving(false);
+    }
+  }
+
+  async function handleEvalDelete(entry_id: string) {
+    if (!editingAgent) return;
+    setEvalDeletingId(entry_id);
+    try {
+      await api.delete(
+        `/agents/${encodeURIComponent(editingAgent.agent_id)}/eval-dataset/${entry_id}`,
+      );
+      setEvalEntries((prev) => prev.filter((e) => e.id !== entry_id));
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Erro ao deletar.";
+      setEvalError(detail);
+    } finally {
+      setEvalDeletingId(null);
+    }
   }
 
   // ── Admin certification ───────────────────────────────────────
@@ -324,6 +425,14 @@ export default function Agents() {
     setRequesting((r) => ({ ...r, [agent_id]: true }));
     setRequestMsg((m) => ({ ...m, [agent_id]: "" }));
     try {
+      // Check eval dataset before allowing approval request
+      const evalResp = await api.get<{ entries: EvalEntry[] }>(
+        `/agents/${encodeURIComponent(agent_id)}/eval-dataset`,
+      );
+      if (!evalResp.data.entries || evalResp.data.entries.length === 0) {
+        setEvalWarningAgentId(agent_id);
+        return;
+      }
       await api.post(`/agents/${encodeURIComponent(agent_id)}/request-approval`);
       loadAgents();
       setRequestMsg((m) => ({ ...m, [agent_id]: "Solicitação enviada" }));
@@ -515,8 +624,10 @@ export default function Agents() {
                 {filtered.map((a) => (
                   <tr key={a.agent_id}>
                     <td className="ag-col-name">
-                      <span className="ag-agent-name">{a.agent_name}</span>
-                      <code className="ag-agent-id">{a.agent_id}</code>
+                      <div className="ag-col-name-inner">
+                        <span className="ag-agent-name">{a.agent_name}</span>
+                        <code className="ag-agent-id">{a.agent_id}</code>
+                      </div>
                     </td>
                     <td>
                       <span className={`ag-badge type-${a.agent_type}`}>
@@ -541,43 +652,56 @@ export default function Agents() {
                     </td>
                     <td className="ag-col-owner">{a.owner_principal}</td>
                     <td className="ag-col-row-action">
-                      <button
-                        className="ag-row-action-btn ag-row-chat"
-                        onClick={() => openChatModal(a)}
-                        title={a.serving_endpoint_name ? `Testar via ${a.serving_endpoint_name}` : "Testar agente"}
-                      >
-                        Testar
-                      </button>
-                      {a.status === "draft" && (
-                        requestMsg[a.agent_id] ? (
-                          <span className={requestMsg[a.agent_id].startsWith("Erro") ? "ag-row-msg ag-row-msg-err" : "ag-row-msg ag-row-msg-ok"}>
-                            {requestMsg[a.agent_id]}
-                          </span>
-                        ) : (
-                          <button
-                            className="ag-row-action-btn ag-row-request-eval"
-                            disabled={!!requesting[a.agent_id]}
-                            onClick={() => handleRequestApproval(a.agent_id)}
-                            title="Solicitar aprovação para staging"
-                          >
-                            {requesting[a.agent_id] ? "..." : "Solicitar Aprovação"}
-                          </button>
-                        )
-                      )}
-                      <button
-                        className={`ag-row-action-btn${a.status === "draft" ? " ag-row-edit" : " ag-row-view"}`}
-                        onClick={() => openEditModal(a)}
-                      >
-                        {a.status === "draft" ? "Editar" : "Ver"}
-                      </button>
-                      <button
-                        className="ag-row-action-btn ag-row-delete"
-                        disabled={!!deleting[a.agent_id]}
-                        onClick={() => handleDelete(a)}
-                        title="Remover registro"
-                      >
-                        {deleting[a.agent_id] ? "..." : "Remover"}
-                      </button>
+                      <div className="ag-col-row-action-inner">
+                        <button
+                          className="ag-row-action-btn ag-row-chat"
+                          onClick={() => openChatModal(a)}
+                          title={a.serving_endpoint_name ? `Testar via ${a.serving_endpoint_name}` : "Testar agente"}
+                        >
+                          Testar
+                        </button>
+                        {a.status === "draft" && (
+                          requestMsg[a.agent_id] ? (
+                            <span className={
+                              requestMsg[a.agent_id].startsWith("Erro")
+                                ? "ag-row-msg ag-row-msg-err"
+                                : "ag-row-msg ag-row-msg-ok"
+                            }>
+                              {requestMsg[a.agent_id]}
+                            </span>
+                          ) : (
+                            <button
+                              className="ag-row-action-btn ag-row-request-eval"
+                              disabled={!!requesting[a.agent_id]}
+                              onClick={() => handleRequestApproval(a.agent_id)}
+                              title="Solicitar aprovação para staging"
+                            >
+                              {requesting[a.agent_id] ? "..." : "Solicitar Aprovação"}
+                            </button>
+                          )
+                        )}
+                        <button
+                          className={`ag-row-action-btn${a.status === "draft" ? " ag-row-edit" : " ag-row-view"}`}
+                          onClick={() => openEditModal(a)}
+                        >
+                          {a.status === "draft" ? "Editar" : "Ver"}
+                        </button>
+                        <button
+                          className="ag-row-action-btn ag-row-dataset"
+                          onClick={() => openEditModal(a, "eval")}
+                          title="Gerenciar dataset de teste"
+                        >
+                          Dataset
+                        </button>
+                        <button
+                          className="ag-row-action-btn ag-row-delete"
+                          disabled={!!deleting[a.agent_id]}
+                          onClick={() => handleDelete(a)}
+                          title="Remover registro"
+                        >
+                          {deleting[a.agent_id] ? "..." : "Remover"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -766,16 +890,27 @@ export default function Agents() {
 
               {/* Form tabs */}
               <div className="ag-form-tabs">
-                {(["basic", "prompt"] as const).map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    className={`ag-form-tab${formTab === t ? " ag-form-tab-active" : ""}`}
-                    onClick={() => setFormTab(t)}
-                  >
-                    {t === "basic" ? "1. Básico" : "2. Prompt & Tools"}
-                  </button>
-                ))}
+                <button
+                  type="button"
+                  className={`ag-form-tab${formTab === "basic" ? " ag-form-tab-active" : ""}`}
+                  onClick={() => setFormTab("basic")}
+                >
+                  1. Básico
+                </button>
+                <button
+                  type="button"
+                  className={`ag-form-tab${formTab === "prompt" ? " ag-form-tab-active" : ""}`}
+                  onClick={() => setFormTab("prompt")}
+                >
+                  2. Prompt & Tools
+                </button>
+                <button
+                  type="button"
+                  className={`ag-form-tab${formTab === "eval" ? " ag-form-tab-active" : ""}`}
+                  onClick={() => setFormTab("eval")}
+                >
+                  3. Dataset de Teste
+                </button>
               </div>
 
               <form className="ag-modal-body" onSubmit={handleSave}>
@@ -950,16 +1085,174 @@ export default function Agents() {
                   </div>
                 )}
 
+                {/* Tab 3: Dataset de Teste */}
+                {formTab === "eval" && (
+                  <div className="ag-form-section">
+                    {!isEditMode ? (
+                      <div className="ag-eval-empty">
+                        Crie o agente primeiro para adicionar entradas ao dataset de teste.
+                      </div>
+                    ) : (<>
+                    <div className="ag-eval-header">
+                      <span className="ag-eval-hint">
+                        Perguntas e respostas esperadas para avaliar o agente com MLflow Eval.
+                      </span>
+                      {!evalAdding && (
+                        <button
+                          type="button"
+                          className="ag-eval-add-btn"
+                          onClick={() => { setEvalAdding(true); setEvalError(""); }}
+                        >
+                          + Adicionar entrada
+                        </button>
+                      )}
+                    </div>
+
+                    {evalError && <div className="ag-save-error">{evalError}</div>}
+
+                    {evalAdding && (
+                      <div className="ag-eval-inline-form">
+                        <div className="ag-eval-inline-field">
+                          <label className="ag-label">Pergunta <span className="req">*</span></label>
+                          <textarea
+                            className="ag-textarea ag-eval-textarea"
+                            rows={3}
+                            placeholder="Ex: Como faço para solicitar férias?"
+                            value={evalAddForm.request}
+                            onChange={(e) => setEvalAddForm({ ...evalAddForm, request: e.target.value })}
+                          />
+                        </div>
+                        <div className="ag-eval-inline-field">
+                          <label className="ag-label">Resposta esperada <span className="req">*</span></label>
+                          <textarea
+                            className="ag-textarea ag-eval-textarea"
+                            rows={3}
+                            placeholder="Ex: Acesse o portal de RH e clique em Férias..."
+                            value={evalAddForm.expected_response}
+                            onChange={(e) => setEvalAddForm({ ...evalAddForm, expected_response: e.target.value })}
+                          />
+                        </div>
+                        <div className="ag-eval-inline-actions">
+                          <button
+                            type="button"
+                            className="ag-cancel-btn"
+                            onClick={() => { setEvalAdding(false); setEvalAddForm({ request: "", expected_response: "" }); }}
+                            disabled={evalAddSaving}
+                          >
+                            Cancelar
+                          </button>
+                          <button
+                            type="button"
+                            className="ag-submit-btn"
+                            onClick={handleEvalAdd}
+                            disabled={evalAddSaving || !evalAddForm.request.trim() || !evalAddForm.expected_response.trim()}
+                          >
+                            {evalAddSaving ? "Salvando..." : "Salvar entrada"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {evalLoading ? (
+                      <div className="ag-tools-loading">Carregando dataset...</div>
+                    ) : evalEntries.length === 0 && !evalAdding ? (
+                      <div className="ag-eval-empty">
+                        Nenhuma entrada ainda. Clique em "Adicionar entrada" para criar a primeira.
+                      </div>
+                    ) : (
+                      <div className="ag-eval-table">
+                        {evalEntries.map((entry, idx) => (
+                          <div key={entry.id} className="ag-eval-row">
+                            <div className="ag-eval-row-num">{idx + 1}</div>
+                            {evalEditingId === entry.id ? (
+                              <div className="ag-eval-row-edit">
+                                <textarea
+                                  className="ag-textarea ag-eval-textarea"
+                                  rows={2}
+                                  value={evalEditForm.request}
+                                  onChange={(e) => setEvalEditForm({ ...evalEditForm, request: e.target.value })}
+                                />
+                                <textarea
+                                  className="ag-textarea ag-eval-textarea"
+                                  rows={2}
+                                  value={evalEditForm.expected_response}
+                                  onChange={(e) => setEvalEditForm({ ...evalEditForm, expected_response: e.target.value })}
+                                />
+                                <div className="ag-eval-inline-actions">
+                                  <button
+                                    type="button"
+                                    className="ag-cancel-btn"
+                                    onClick={() => setEvalEditingId(null)}
+                                    disabled={evalEditSaving}
+                                  >
+                                    Cancelar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="ag-submit-btn"
+                                    onClick={() => handleEvalUpdate(entry.id)}
+                                    disabled={evalEditSaving || !evalEditForm.request.trim() || !evalEditForm.expected_response.trim()}
+                                  >
+                                    {evalEditSaving ? "Salvando..." : "Salvar"}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="ag-eval-row-content">
+                                <div className="ag-eval-cell">
+                                  <span className="ag-eval-cell-label">Pergunta</span>
+                                  <span className="ag-eval-cell-text">{entry.request}</span>
+                                </div>
+                                <div className="ag-eval-cell">
+                                  <span className="ag-eval-cell-label">Resposta esperada</span>
+                                  <span className="ag-eval-cell-text">{entry.expected_response}</span>
+                                </div>
+                                <div className="ag-eval-row-actions">
+                                  <button
+                                    type="button"
+                                    className="ag-eval-edit-btn"
+                                    onClick={() => {
+                                      setEvalEditingId(entry.id);
+                                      setEvalEditForm({ request: entry.request, expected_response: entry.expected_response });
+                                      setEvalError("");
+                                    }}
+                                  >
+                                    Editar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="ag-eval-del-btn"
+                                    onClick={() => handleEvalDelete(entry.id)}
+                                    disabled={evalDeletingId === entry.id}
+                                  >
+                                    {evalDeletingId === entry.id ? "..." : "Excluir"}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    </>)}
+                  </div>
+                )}
+
                 {/* Footer */}
                 <div className="ag-modal-footer">
                   <div className="ag-footer-nav">
                     {formTab !== "basic" && (
-                      <button type="button" className="ag-nav-btn" onClick={() => setFormTab("basic")}>
+                      <button type="button" className="ag-nav-btn" onClick={() => setFormTab(formTab === "eval" ? "prompt" : "basic")}>
                         ← Anterior
                       </button>
                     )}
-                    {formTab !== "prompt" && (
+                    {formTab === "basic" && (
                       <button type="button" className="ag-nav-btn" onClick={() => setFormTab("prompt")}>
+                        Próximo →
+                      </button>
+                    )}
+                    {formTab === "prompt" && (
+                      <button type="button" className="ag-nav-btn" onClick={() => setFormTab("eval")}>
                         Próximo →
                       </button>
                     )}
@@ -968,7 +1261,7 @@ export default function Agents() {
                     <button type="button" className="ag-cancel-btn" onClick={closeModal} disabled={saving}>
                       {isReadOnly ? "Fechar" : "Cancelar"}
                     </button>
-                    {!isReadOnly && (
+                    {!isReadOnly && formTab !== "eval" && (
                       <button
                         type="submit"
                         className="ag-submit-btn"
@@ -986,6 +1279,44 @@ export default function Agents() {
           </div>
         );
       })()}
+
+      {/* ── Eval warning modal ── */}
+      {evalWarningAgentId && (
+        <div className="ag-overlay" onClick={() => setEvalWarningAgentId(null)}>
+          <div className="ag-modal ag-eval-warn-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="ag-modal-header">
+              <h2 className="ag-modal-title">Dataset de Teste Vazio</h2>
+              <button className="ag-modal-close" onClick={() => setEvalWarningAgentId(null)}>✕</button>
+            </div>
+            <div className="ag-eval-warn-body">
+              <p className="ag-eval-warn-text">
+                Preencha o dataset de teste antes de solicitar aprovação.
+              </p>
+              <p className="ag-eval-warn-hint">
+                Adicione pelo menos uma pergunta e resposta esperada na aba "Dataset de Teste" do agente.
+              </p>
+            </div>
+            <div className="ag-eval-warn-actions">
+              <button
+                className="ag-btn-secondary"
+                onClick={() => setEvalWarningAgentId(null)}
+              >
+                Fechar
+              </button>
+              <button
+                className="ag-btn-primary"
+                onClick={() => {
+                  const agent = agents.find((a) => a.agent_id === evalWarningAgentId);
+                  setEvalWarningAgentId(null);
+                  if (agent) openEditModal(agent, "eval");
+                }}
+              >
+                Preencher Dataset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Chat modal ── */}
       {chatModal && (

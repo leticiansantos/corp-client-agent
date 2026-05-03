@@ -285,6 +285,17 @@
   overflow: hidden;
 }
 
+.tl-modal.tl-modal-sm {
+  width: 440px;
+}
+
+.tl-error-tool-name {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-muted);
+  margin: 0 0 10px;
+}
+
 /* ── Modal header ────────────────────────────────────────────── */
 .tl-modal-header {
   display: flex;

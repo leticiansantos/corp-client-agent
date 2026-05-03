@@ -83,6 +83,7 @@ export default function Tools() {
   const [deleteMsg, setDeleteMsg]   = useState<Record<string, string>>({});
   const [promoting2, setPromoting2] = useState<Record<string, boolean>>({});
   const [promote2Msg, setPromote2Msg] = useState<Record<string, string>>({});
+  const [promoteError, setPromoteError] = useState<{ tool: string; msg: string } | null>(null);
 
   const [showModal, setShowModal] = useState(false);
   const [form, setForm]           = useState<NewToolForm>(EMPTY_FORM);
@@ -454,7 +455,7 @@ export default function Tools() {
       const msg =
         (err as { response?: { data?: { detail?: string } } })?.response?.data
           ?.detail ?? "Erro ao promover ambiente.";
-      setPromote2Msg((m) => ({ ...m, [tool_name]: `Erro: ${msg}` }));
+      setPromoteError({ tool: tool_name, msg });
     } finally {
       setPromoting2((p) => ({ ...p, [tool_name]: false }));
     }
@@ -768,6 +769,27 @@ export default function Tools() {
           );
         })()}
       </div>
+
+      {/* ── Promote error modal ── */}
+      {promoteError && (
+        <div className="tl-overlay" onClick={() => setPromoteError(null)}>
+          <div className="tl-modal tl-modal-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="tl-modal-header">
+              <h2 className="tl-modal-title">Falha ao promover tool</h2>
+              <button className="tl-modal-close" onClick={() => setPromoteError(null)} aria-label="Fechar">×</button>
+            </div>
+            <div className="tl-modal-body">
+              <p className="tl-error-tool-name">{promoteError.tool}</p>
+              <div className="tl-save-error">{promoteError.msg}</div>
+            </div>
+            <div className="tl-modal-footer">
+              <button className="tl-submit-btn" onClick={() => setPromoteError(null)}>
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── New Tool modal ── */}
       {showModal && (

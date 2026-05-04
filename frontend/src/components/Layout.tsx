@@ -6,6 +6,7 @@ const DBX_LOGO = "https://cdn.brandfetch.io/idSUrLOWbH/w/400/h/98/theme/dark/log
 const NAV_ITEMS = [
   { label: "Tools",    to: "/tools" },
   { label: "Agents",   to: "/agents" },
+  { label: "Run",      to: "/run" },
   { label: "Settings", to: "/settings" },
 ];
 

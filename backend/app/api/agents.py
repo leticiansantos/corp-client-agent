@@ -21,7 +21,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.ml import ExperimentTag
 import time as _time
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 from pydantic import BaseModel
 
 from app.api.db import _execute_sql, _rows_to_dicts, _esc
@@ -201,13 +201,14 @@ def _fetch_agents_for_env(env: str) -> list[tuple[int, dict]]:
 
 
 @router.get("/agents")
-def list_agents():
-    """Aggregate agents from all configured envs, highest-env record wins for duplicates."""
+def list_agents(env: str | None = Query(default=None)):
+    """Aggregate agents from configured envs. When env is given, only that env is queried."""
+    envs_to_query = [env] if env in ENVS else list(ENVS)
     best: dict[str, tuple[int, dict]] = {}
 
-    # Query all environments in parallel
-    with ThreadPoolExecutor(max_workers=len(ENVS)) as executor:
-        futures = {executor.submit(_fetch_agents_for_env, env): env for env in ENVS}
+    # Query environments in parallel
+    with ThreadPoolExecutor(max_workers=len(envs_to_query)) as executor:
+        futures = {executor.submit(_fetch_agents_for_env, e): e for e in envs_to_query}
         for future in as_completed(futures, timeout=120):
             try:
                 for rank, row in future.result():

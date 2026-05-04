@@ -15,6 +15,7 @@ Column mapping (framework schema uses 'name', not 'agent_name'):
 
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.ml import ExperimentTag
@@ -133,66 +134,89 @@ def _find_agent(agent_id: str) -> tuple[WorkspaceClient, str, str, str] | None:
 
 # ── List agents ───────────────────────────────────────────────
 
+# Cache: prefixes whose late-added columns have already been migrated this run.
+# ALTER TABLE is idempotent but slow — skip after first successful migration.
+_agents_col_migrated: set[str] = set()
+
+_LATE_AGENT_COLS = (
+    "ADD COLUMN approval_requested   BOOLEAN",
+    "ADD COLUMN mlflow_experiment_id STRING",
+    "ADD COLUMN mlflow_url           STRING",
+    "ADD COLUMN eval_run_id          STRING",
+    "ADD COLUMN eval_status          STRING",
+)
+
+
+def _fetch_agents_for_env(env: str) -> list[tuple[int, dict]]:
+    """Query agents for one environment. Returns [(rank, row), ...] or []."""
+    parts = _env_client(env)
+    if parts is None:
+        return []
+    w, catalog, schema_name, warehouse_id = parts
+    prefix = f"{catalog}.{schema_name}"
+    rank = _ENV_RANK.get(env, 0)
+
+    # Run late-added column migrations only once per prefix per server start
+    if prefix not in _agents_col_migrated:
+        for col_ddl in _LATE_AGENT_COLS:
+            try:
+                _sql(w, warehouse_id, f"ALTER TABLE {prefix}.agents_config {col_ddl}")
+            except Exception:
+                pass  # column already exists or table doesn't exist yet
+        _agents_col_migrated.add(prefix)
+
+    try:
+        resp = _sql(w, warehouse_id, f"""
+            SELECT agent_id,
+                   name            AS agent_name,
+                   agent_type,
+                   owner_principal,
+                   description,
+                   instructions,
+                   to_json(tools_enabled) AS tools_enabled,
+                   model,
+                   serving_endpoint_name,
+                   eval_profile,
+                   min_safety_score,
+                   min_correctness_score,
+                   environment,
+                   status,
+                   runtime_mode,
+                   approval_requested,
+                   mlflow_experiment_id,
+                   mlflow_url,
+                   eval_run_id,
+                   eval_status,
+                   created_at,
+                   updated_at
+            FROM {prefix}.agents_config
+            ORDER BY created_at DESC
+        """)
+        rows = _rows_to_dicts(resp)
+        for row in rows:
+            row["environment"] = row.get("environment") or env
+        return [(rank, row) for row in rows if row.get("agent_id")]
+    except Exception:
+        return []
+
+
 @router.get("/agents")
 def list_agents():
     """Aggregate agents from all configured envs, highest-env record wins for duplicates."""
     best: dict[str, tuple[int, dict]] = {}
-    for env in ENVS:
-        parts = _env_client(env)
-        if parts is None:
-            continue
-        w, catalog, schema_name, warehouse_id = parts
-        prefix = f"{catalog}.{schema_name}"
-        rank = _ENV_RANK.get(env, 0)
-        # Ensure late-added columns exist before querying
-        for _col_ddl in (
-            "ADD COLUMN approval_requested   BOOLEAN",
-            "ADD COLUMN mlflow_experiment_id STRING",
-            "ADD COLUMN mlflow_url           STRING",
-            "ADD COLUMN eval_run_id          STRING",
-            "ADD COLUMN eval_status          STRING",
-        ):
+
+    # Query all environments in parallel
+    with ThreadPoolExecutor(max_workers=len(ENVS)) as executor:
+        futures = {executor.submit(_fetch_agents_for_env, env): env for env in ENVS}
+        for future in as_completed(futures, timeout=120):
             try:
-                _sql(w, warehouse_id, f"ALTER TABLE {prefix}.agents_config {_col_ddl}")
+                for rank, row in future.result():
+                    key = row["agent_id"]
+                    current_rank, _ = best.get(key, (-1, {}))
+                    if rank > current_rank:
+                        best[key] = (rank, row)
             except Exception:
-                pass  # column already exists or table doesn't exist yet
-        try:
-            resp = _sql(w, warehouse_id, f"""
-                SELECT agent_id,
-                       name            AS agent_name,
-                       agent_type,
-                       owner_principal,
-                       description,
-                       instructions,
-                       to_json(tools_enabled) AS tools_enabled,
-                       model,
-                       serving_endpoint_name,
-                       eval_profile,
-                       min_safety_score,
-                       min_correctness_score,
-                       environment,
-                       status,
-                       runtime_mode,
-                       approval_requested,
-                       mlflow_experiment_id,
-                       mlflow_url,
-                       eval_run_id,
-                       eval_status,
-                       created_at,
-                       updated_at
-                FROM {prefix}.agents_config
-                ORDER BY created_at DESC
-            """)
-            for row in _rows_to_dicts(resp):
-                key = row.get("agent_id") or ""
-                if not key:
-                    continue
-                row["environment"] = row.get("environment") or env
-                current_rank, _ = best.get(key, (-1, {}))
-                if rank > current_rank:
-                    best[key] = (rank, row)
-        except Exception:
-            continue
+                pass
 
     agents = []
     for _, row in sorted(best.values(), key=lambda x: x[0], reverse=True):

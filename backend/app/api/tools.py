@@ -10,6 +10,7 @@ This matches how corp_agent_framework's ConfigDrivenAgent reads tools at runtime
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from databricks.sdk import WorkspaceClient
 from fastapi import APIRouter, HTTPException, status
@@ -207,6 +208,29 @@ def _find_tool(tool_name: str) -> tuple[WorkspaceClient, str, str] | None:
 
 
 # ── List tools (all envs) ─────────────────────────────────────
+
+def _fetch_tools_for_env(env: str) -> list[tuple[int, dict]]:
+    """Query tools for one environment. Returns [(rank, row), ...] or []."""
+    parts = _env_client(env)
+    if parts is None:
+        return []
+    w, catalog, schema_name, warehouse_id = parts
+    prefix = f"{catalog}.{schema_name}"
+    rank = _ENV_RANK[env]
+    try:
+        resp = _sql(w, warehouse_id, f"""
+            SELECT tool_name, kind, ref, description, owner, status, environment, created_at
+            FROM {prefix}.tools_config
+            ORDER BY created_at DESC
+        """)
+        rows = _rows_to_dicts(resp)
+        for row in rows:
+            row["environment"] = row.get("environment") or env
+        return [(rank, row) for row in rows if row.get("tool_name")]
+    except Exception:
+        return []
+
+
 @router.get("/tools")
 def list_tools():
     """
@@ -214,35 +238,20 @@ def list_tools():
     When the same tool_name appears in multiple envs, keep the highest-env record
     (prod > staging > dev).
     """
-    # key → (env_rank, row)
     best: dict[str, tuple[int, dict]] = {}
 
-    for env in ENVS:
-        parts = _env_client(env)
-        if parts is None:
-            continue
-        w, catalog, schema_name, warehouse_id = parts
-        prefix = f"{catalog}.{schema_name}"
-        rank = _ENV_RANK[env]
-        try:
-            resp = _sql(w, warehouse_id, f"""
-                SELECT tool_name, kind, ref, description, owner, status, environment, created_at
-                FROM {prefix}.tools_config
-                ORDER BY created_at DESC
-            """)
-            for row in _rows_to_dicts(resp):
-                key = row.get("tool_name", "")
-                if not key:
-                    continue
-                row["environment"] = row.get("environment") or env
-                current_rank, _ = best.get(key, (-1, {}))
-                if rank > current_rank:
-                    best[key] = (rank, row)
-        except Exception:
-            # Table may not exist yet in this env — skip
-            pass
+    with ThreadPoolExecutor(max_workers=len(ENVS)) as executor:
+        futures = {executor.submit(_fetch_tools_for_env, env): env for env in ENVS}
+        for future in as_completed(futures, timeout=120):
+            try:
+                for rank, row in future.result():
+                    key = row["tool_name"]
+                    current_rank, _ = best.get(key, (-1, {}))
+                    if rank > current_rank:
+                        best[key] = (rank, row)
+            except Exception:
+                pass
 
-    # Return sorted: prod tools first, then staging, then dev; within each env by name
     all_tools = [row for _, row in sorted(best.values(), key=lambda x: (-x[0], x[1].get("tool_name", "")))]
     return {"tools": all_tools}
 

@@ -16,6 +16,7 @@ import sys as _sys
 import tempfile as _tempfile
 import threading as _threading
 import time as _time
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor, as_completed as _as_completed
 
 _log = _logging.getLogger(__name__)
 
@@ -606,76 +607,62 @@ def save_workspace_envs(body: SaveWorkspaceEnvsRequest):
 
 # ── Routes: framework endpoints ────────────────────────────────
 
+def _fetch_endpoint_for_env(env: str) -> dict:
+    endpoint_name = ENDPOINT_NAME_TPL.format(env=env)
+    base = {
+        "env": env, "endpoint_name": endpoint_name,
+        "deploying": env in _DEPLOYING_ENVS,
+        "deploy_step": _DEPLOY_STEP.get(env, ""),
+        "deploy_step_index": _DEPLOY_STEP_IDX.get(env, 0),
+        "deploy_error": _DEPLOY_ERROR.get(env, ""),
+    }
+    try:
+        env_cfg = _get_env_config_from_db(env)
+    except Exception as exc:
+        return {**base, "endpoint_url": "", "state": "ERROR", "error": str(exc)}
+
+    if not env_cfg or not env_cfg.get("workspace_url") or not env_cfg.get("token"):
+        return {**base, "endpoint_url": "", "state": "NOT_CONFIGURED"}
+
+    try:
+        w        = _get_env_workspace_client(env_cfg)
+        ep_state = _check_endpoint_state(w, endpoint_name)
+
+        is_deploying = env in _DEPLOYING_ENVS
+        if not is_deploying:
+            is_deploying = _check_active_deploy_job(w, endpoint_name)
+            if is_deploying:
+                with _DEPLOYING_LOCK:
+                    _DEPLOYING_ENVS.add(env)
+                if env not in _DEPLOY_STEP_IDX:
+                    _DEPLOY_STEP[env]     = "Aguardando conclusão do job de deploy..."
+                    _DEPLOY_STEP_IDX[env] = _DEPLOY_TOTAL_STEPS - 1
+
+        workspace_url = env_cfg["workspace_url"].rstrip("/")
+        endpoint_url  = (
+            f"{workspace_url}/serving-endpoints/{endpoint_name}/invocations"
+            if ep_state != "NOT_FOUND"
+            else ""
+        )
+        return {
+            **base,
+            "endpoint_url": endpoint_url, "state": ep_state,
+            "deploying": is_deploying,
+            "deploy_step": _DEPLOY_STEP.get(env, ""),
+            "deploy_step_index": _DEPLOY_STEP_IDX.get(env, 0),
+            "deploy_error": _DEPLOY_ERROR.get(env, ""),
+        }
+    except Exception as exc:
+        return {**base, "endpoint_url": "", "state": "ERROR", "error": str(exc)}
+
+
 @router.get("/framework-endpoints")
 def get_framework_endpoints():
-    results = []
-    for env in ENVS:
-        endpoint_name = ENDPOINT_NAME_TPL.format(env=env)
-        try:
-            env_cfg = _get_env_config_from_db(env)
-        except Exception as exc:
-            results.append({
-                "env": env, "endpoint_name": endpoint_name,
-                "endpoint_url": "", "state": "ERROR",
-                "deploying": env in _DEPLOYING_ENVS,
-                "deploy_step": _DEPLOY_STEP.get(env, ""),
-                "deploy_step_index": _DEPLOY_STEP_IDX.get(env, 0),
-                "deploy_error": _DEPLOY_ERROR.get(env, ""),
-                "error": str(exc),
-            })
-            continue
-
-        if not env_cfg or not env_cfg.get("workspace_url") or not env_cfg.get("token"):
-            results.append({
-                "env": env, "endpoint_name": endpoint_name,
-                "endpoint_url": "", "state": "NOT_CONFIGURED",
-                "deploying": env in _DEPLOYING_ENVS,
-                "deploy_step": _DEPLOY_STEP.get(env, ""),
-                "deploy_step_index": _DEPLOY_STEP_IDX.get(env, 0),
-                "deploy_error": _DEPLOY_ERROR.get(env, ""),
-            })
-            continue
-
-        try:
-            w          = _get_env_workspace_client(env_cfg)
-            ep_state   = _check_endpoint_state(w, endpoint_name)
-
-            is_deploying = env in _DEPLOYING_ENVS
-            if not is_deploying:
-                is_deploying = _check_active_deploy_job(w, endpoint_name)
-                if is_deploying:
-                    with _DEPLOYING_LOCK:
-                        _DEPLOYING_ENVS.add(env)
-                    # Job detected externally (e.g. after server restart) — show last step
-                    if env not in _DEPLOY_STEP_IDX:
-                        _DEPLOY_STEP[env]     = "Aguardando conclusão do job de deploy..."
-                        _DEPLOY_STEP_IDX[env] = _DEPLOY_TOTAL_STEPS - 1
-
-            workspace_url = env_cfg["workspace_url"].rstrip("/")
-            endpoint_url  = (
-                f"{workspace_url}/serving-endpoints/{endpoint_name}/invocations"
-                if ep_state != "NOT_FOUND"
-                else ""
-            )
-            results.append({
-                "env": env, "endpoint_name": endpoint_name,
-                "endpoint_url": endpoint_url, "state": ep_state,
-                "deploying": is_deploying,
-                "deploy_step": _DEPLOY_STEP.get(env, ""),
-                "deploy_step_index": _DEPLOY_STEP_IDX.get(env, 0),
-                "deploy_error": _DEPLOY_ERROR.get(env, ""),
-            })
-        except Exception as exc:
-            results.append({
-                "env": env, "endpoint_name": endpoint_name,
-                "endpoint_url": "", "state": "ERROR",
-                "deploying": env in _DEPLOYING_ENVS,
-                "deploy_step": _DEPLOY_STEP.get(env, ""),
-                "deploy_step_index": _DEPLOY_STEP_IDX.get(env, 0),
-                "deploy_error": _DEPLOY_ERROR.get(env, ""),
-                "error": str(exc),
-            })
-
+    order = {e: i for i, e in enumerate(ENVS)}
+    with _ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(_fetch_endpoint_for_env, env): env for env in ENVS}
+        results = [f.result() for f in _as_completed(futures)]
+    results.sort(key=lambda r: order.get(r["env"], 99))
     return {"endpoints": results}
 
 

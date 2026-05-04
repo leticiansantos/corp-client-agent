@@ -616,9 +616,22 @@ def _promote_genie_space(
     else:
         try:
             result = target_w.api_client.do("POST", "/api/2.0/genie/spaces", body=payload)
-            target_space_id = result.get("space_id") or result.get("id") or ""
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Falha ao criar Genie space: {exc}") from exc
+        target_space_id = (result or {}).get("space_id") or (result or {}).get("id") or ""
+        if not target_space_id:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Falha ao criar Genie space: API não retornou o ID do espaço. Resposta: {result}",
+            )
+        # Verify the space is accessible before registering the tool
+        try:
+            target_w.api_client.do("GET", f"/api/2.0/genie/spaces/{target_space_id}")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Genie space {target_space_id} criado mas inacessível: {exc}",
+            ) from exc
 
     return f"{target_host}/api/2.0/mcp/genie/{target_space_id}"
 

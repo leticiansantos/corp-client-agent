@@ -22,6 +22,10 @@ interface Agent {
   environment: string;
   status: AgentStatus;
   runtime_mode: string;
+  mlflow_experiment_id: string | null;
+  mlflow_url: string | null;
+  eval_run_id: string | null;
+  eval_status: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -146,6 +150,10 @@ export default function Agents() {
   // Admin actions
   const [promoting, setPromoting]   = useState<Record<string, boolean>>({});
   const [promoteMsg, setPromoteMsg] = useState<Record<string, string>>({});
+
+  // Eval run
+  const [triggeringEval, setTriggeringEval] = useState<Record<string, boolean>>({});
+  const [evalRunMsg, setEvalRunMsg]         = useState<Record<string, string>>({});
 
   // Approval request (domain team)
   const [requesting, setRequesting]         = useState<Record<string, boolean>>({});
@@ -420,6 +428,23 @@ export default function Agents() {
     }
   }
 
+  // ── Run eval ──────────────────────────────────────────────────
+  async function handleRunEval(agent_id: string) {
+    setTriggeringEval((r) => ({ ...r, [agent_id]: true }));
+    setEvalRunMsg((m) => ({ ...m, [agent_id]: "" }));
+    try {
+      await api.post(`/agents/${encodeURIComponent(agent_id)}/run-eval`);
+      loadAgents();
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Erro ao disparar avaliação.";
+      setEvalRunMsg((m) => ({ ...m, [agent_id]: `Erro: ${msg}` }));
+    } finally {
+      setTriggeringEval((r) => ({ ...r, [agent_id]: false }));
+    }
+  }
+
   // ── Request approval (domain team) ───────────────────────────
   async function handleRequestApproval(agent_id: string) {
     setRequesting((r) => ({ ...r, [agent_id]: true }));
@@ -453,13 +478,18 @@ export default function Agents() {
     setReviewMsg((m) => ({ ...m, [agent_id]: "" }));
     try {
       if (action === "approve") {
-        await api.post(`/agents/${encodeURIComponent(agent_id)}/promote`);
+        const resp = await api.post<{ mlflow_experiment_id?: string | null }>(
+          `/agents/${encodeURIComponent(agent_id)}/promote`,
+        );
+        loadAgents();
+        const expNote = resp.data.mlflow_experiment_id ? ` (exp: ${resp.data.mlflow_experiment_id})` : "";
+        setReviewMsg((m) => ({ ...m, [agent_id]: `→ Promovido para Staging${expNote}` }));
       } else {
         await api.post(`/agents/${encodeURIComponent(agent_id)}/reject-approval`);
+        loadAgents();
+        setReviewMsg((m) => ({ ...m, [agent_id]: "Solicitação rejeitada" }));
       }
-      loadAgents();
-      setReviewMsg((m) => ({ ...m, [agent_id]: action === "approve" ? "→ Promovido para Staging" : "Solicitação rejeitada" }));
-      setTimeout(() => setReviewMsg((m) => ({ ...m, [agent_id]: "" })), 3000);
+      setTimeout(() => setReviewMsg((m) => ({ ...m, [agent_id]: "" })), 6000);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
@@ -834,13 +864,41 @@ export default function Agents() {
                             </td>
                             <td className="ag-col-owner">{a.owner_principal}</td>
                             <td className="ag-col-actions">
-                              {promoteMsg[a.agent_id] ? (
-                                <span className={promoteMsg[a.agent_id].startsWith("Erro") ? "ag-promote-msg ag-promote-err" : "ag-promote-msg ag-promote-ok"}>
-                                  {promoteMsg[a.agent_id]}
-                                </span>
-                              ) : (
-                                <div className="ag-action-btns">
-                                  {STATUS_TRANSITIONS[a.status]?.map((t) => (
+                              <div className="ag-action-btns">
+                                {/* MLflow experiment link */}
+                                {a.mlflow_url && (
+                                  <a
+                                    href={a.mlflow_url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="ag-action-btn ag-action-mlflow"
+                                    title="Abrir experimento no Databricks MLflow"
+                                  >
+                                    MLflow ↗
+                                  </a>
+                                )}
+                                {/* Eval run button / status */}
+                                {evalRunMsg[a.agent_id] ? (
+                                  <span className="ag-promote-msg ag-promote-err">{evalRunMsg[a.agent_id]}</span>
+                                ) : a.eval_status === "running" ? (
+                                  <span className="ag-eval-running-badge">⏳ Rodando...</span>
+                                ) : (
+                                  <button
+                                    className="ag-action-btn ag-action-run-eval"
+                                    disabled={!!triggeringEval[a.agent_id]}
+                                    onClick={() => handleRunEval(a.agent_id)}
+                                    title="Rodar experimento de avaliação"
+                                  >
+                                    {triggeringEval[a.agent_id] ? "..." : a.eval_status === "completed" ? "Re-rodar Experimento" : a.eval_status === "failed" ? "Tentar Novamente" : "Rodar Experimento"}
+                                  </button>
+                                )}
+                                {/* Promote button */}
+                                {promoteMsg[a.agent_id] ? (
+                                  <span className={promoteMsg[a.agent_id].startsWith("Erro") ? "ag-promote-msg ag-promote-err" : "ag-promote-msg ag-promote-ok"}>
+                                    {promoteMsg[a.agent_id]}
+                                  </span>
+                                ) : (
+                                  STATUS_TRANSITIONS[a.status]?.map((t) => (
                                     <button
                                       key={t.next}
                                       className={`ag-action-btn ag-action-${t.variant}`}
@@ -849,12 +907,9 @@ export default function Agents() {
                                     >
                                       {promoting[a.agent_id] ? "..." : t.label}
                                     </button>
-                                  ))}
-                                  {STATUS_TRANSITIONS[a.status]?.length === 0 && (
-                                    <span className="ag-no-actions">—</span>
-                                  )}
-                                </div>
-                              )}
+                                  ))
+                                )}
+                              </div>
                             </td>
                           </tr>
                         ))}

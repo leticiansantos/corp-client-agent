@@ -356,6 +356,33 @@
 .ag-action-deploy:hover:not(:disabled)  { background: #BFDBFE; }
 
 .ag-action-danger  { background: #FEE2E2; color: #991B1B; }
+
+.ag-action-run-eval { background: #EDE9FE; color: #5B21B6; }
+.ag-action-run-eval:hover:not(:disabled) { background: #DDD6FE; }
+.ag-action-run-eval:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.ag-action-mlflow {
+  background: #F0F9FF;
+  color: #0369A1;
+  border: 1px solid #BAE6FD;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.ag-action-mlflow:hover { background: #E0F2FE; }
+
+.ag-eval-running-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: #FEF3C7;
+  color: #92400E;
+  border-radius: 5px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
 .ag-action-danger:hover:not(:disabled)  { background: #FECACA; }
 
 .ag-promote-msg { font-size: 0.82rem; font-weight: 500; }

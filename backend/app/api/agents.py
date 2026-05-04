@@ -14,13 +14,17 @@ Column mapping (framework schema uses 'name', not 'agent_name'):
 """
 
 import json
+import sys
 
 from databricks.sdk import WorkspaceClient
-from fastapi import APIRouter, HTTPException, status
+from databricks.sdk.service.ml import ExperimentTag
+import time as _time
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 from pydantic import BaseModel
 
 from app.api.db import _execute_sql, _rows_to_dicts, _esc
-from app.api.tools import _env_client, _get_env_config, _sql, _ENVS_DESC, _ENV_RANK, _ensure_tools_table
+from app.api.tools import _env_client, _get_env_config, _sql, _ENVS_DESC, _ENV_RANK, _ensure_tools_table, _workspace_client_for_env, _promote_genie_space
 from app.config import settings
 
 router = APIRouter(prefix="/api")
@@ -79,6 +83,12 @@ _MIGRATIONS = [
     "ADD COLUMN instructions            STRING",
     # Approval workflow
     "ADD COLUMN approval_requested      BOOLEAN",
+    # MLflow experiment linked at promote-to-staging time
+    "ADD COLUMN mlflow_experiment_id    STRING",
+    "ADD COLUMN mlflow_url              STRING",
+    # Eval run tracking
+    "ADD COLUMN eval_run_id             STRING",
+    "ADD COLUMN eval_status             STRING",
 ]
 
 
@@ -134,12 +144,18 @@ def list_agents():
         w, catalog, schema_name, warehouse_id = parts
         prefix = f"{catalog}.{schema_name}"
         rank = _ENV_RANK.get(env, 0)
-        # Ensure approval_requested column exists before querying
-        try:
-            _sql(w, warehouse_id,
-                 f"ALTER TABLE {prefix}.agents_config ADD COLUMN approval_requested BOOLEAN")
-        except Exception:
-            pass  # column already exists or table doesn't exist yet
+        # Ensure late-added columns exist before querying
+        for _col_ddl in (
+            "ADD COLUMN approval_requested   BOOLEAN",
+            "ADD COLUMN mlflow_experiment_id STRING",
+            "ADD COLUMN mlflow_url           STRING",
+            "ADD COLUMN eval_run_id          STRING",
+            "ADD COLUMN eval_status          STRING",
+        ):
+            try:
+                _sql(w, warehouse_id, f"ALTER TABLE {prefix}.agents_config {_col_ddl}")
+            except Exception:
+                pass  # column already exists or table doesn't exist yet
         try:
             resp = _sql(w, warehouse_id, f"""
                 SELECT agent_id,
@@ -158,6 +174,10 @@ def list_agents():
                        status,
                        runtime_mode,
                        approval_requested,
+                       mlflow_experiment_id,
+                       mlflow_url,
+                       eval_run_id,
+                       eval_status,
                        created_at,
                        updated_at
                 FROM {prefix}.agents_config
@@ -421,13 +441,65 @@ def promote_agent(agent_id: str):
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
     row = rows[0]
 
+    # ── 1. Register MLflow experiment BEFORE writing to staging ──
+    mlflow_experiment_id: str | None = None
+    if next_env == "staging":
+        exp_name = f"/Framework Agents/{agent_id}"
+        print(f"[MLflow] Criando experimento '{exp_name}' no staging...", file=sys.stderr)
+        try:
+            # Ensure parent directory exists in the staging workspace
+            w_dst.workspace.mkdirs(path="/Framework Agents")
+        except Exception as mk_exc:
+            print(f"[MLflow] mkdirs aviso: {mk_exc}", file=sys.stderr)
+        try:
+            # Create experiment (or recover existing)
+            try:
+                create_resp = w_dst.experiments.create_experiment(
+                    name=exp_name,
+                    tags=[ExperimentTag(key="mlflow.experimentType", value="GENAI_EXPERIMENT")],
+                )
+                mlflow_experiment_id = create_resp.experiment_id
+                print(f"[MLflow] Criado: experiment_id={mlflow_experiment_id}", file=sys.stderr)
+            except Exception as create_exc:
+                print(f"[MLflow] create_experiment falhou ({create_exc}), tentando get_by_name...", file=sys.stderr)
+                get_resp = w_dst.experiments.get_by_name(experiment_name=exp_name)
+                if get_resp and get_resp.experiment:
+                    mlflow_experiment_id = get_resp.experiment.experiment_id
+                    # Ensure the GENAI_EXPERIMENT tag is present on recovered experiments
+                    w_dst.experiments.set_experiment_tag(
+                        experiment_id=mlflow_experiment_id,
+                        key="mlflow.experimentType",
+                        value="GENAI_EXPERIMENT",
+                    )
+                    print(f"[MLflow] Recuperado: experiment_id={mlflow_experiment_id}", file=sys.stderr)
+
+            if not mlflow_experiment_id:
+                raise ValueError("experiment_id não retornado após create/get_by_name.")
+
+        except Exception as exc:
+            print(f"[MLflow] Falha: {exc}", file=sys.stderr)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Falha ao registrar experimento MLflow no staging: {exc}",
+            )
+        if not mlflow_experiment_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Falha ao registrar experimento MLflow no staging: experiment_id não retornado.",
+            )
+
+    # ── 2. Write agent config to destination env ──────────────────
     _ensure_agents_table(w_dst, wh_dst, prefix_dst)
 
     tools_json  = (row.get("tools_enabled_json") or "[]").replace("'", "\\'")
     min_safety  = str(row["min_safety_score"])      if row.get("min_safety_score")      is not None else "NULL"
     min_correct = str(row["min_correctness_score"]) if row.get("min_correctness_score") is not None else "NULL"
-    # Always use the canonical framework endpoint for the destination environment
     endpoint    = _ENV_FRAMEWORK_ENDPOINT.get(next_env, _FRAMEWORK_ENDPOINT)
+    mlflow_col  = f"'{_esc(mlflow_experiment_id)}'" if mlflow_experiment_id else "NULL"
+
+    staging_host = (_get_env_config(next_env).get("workspace_url") or "").rstrip("/") if next_env == "staging" else ""
+    mlflow_url_val = f"{staging_host}/ml/experiments/{mlflow_experiment_id}" if (mlflow_experiment_id and staging_host) else None
+    mlflow_url_col = f"'{_esc(mlflow_url_val)}'" if mlflow_url_val else "NULL"
 
     _sql(w_dst, wh_dst, f"""
     MERGE INTO {prefix_dst}.agents_config AS target
@@ -445,7 +517,9 @@ def promote_agent(agent_id: str):
         '{_esc(row.get("eval_profile",""))}'     AS eval_profile,
         {min_safety}                             AS min_safety_score,
         {min_correct}                            AS min_correctness_score,
-        '{_esc(row.get("runtime_mode",""))}'     AS runtime_mode
+        '{_esc(row.get("runtime_mode",""))}'     AS runtime_mode,
+        {mlflow_col}                             AS mlflow_experiment_id,
+        {mlflow_url_col}                         AS mlflow_url
     ) AS source
     ON target.agent_id = source.agent_id
     WHEN MATCHED THEN UPDATE SET
@@ -461,23 +535,27 @@ def promote_agent(agent_id: str):
         min_safety_score      = source.min_safety_score,
         min_correctness_score = source.min_correctness_score,
         runtime_mode          = source.runtime_mode,
+        mlflow_experiment_id  = source.mlflow_experiment_id,
+        mlflow_url            = source.mlflow_url,
         status                = 'active',
         updated_at            = current_timestamp()
     WHEN NOT MATCHED THEN INSERT (
         agent_id, name, agent_type, owner_principal, description, instructions,
         tools_enabled, model, serving_endpoint_name, eval_profile,
         min_safety_score, min_correctness_score,
-        environment, status, runtime_mode, created_at, created_by, updated_at
+        environment, status, runtime_mode, mlflow_experiment_id, mlflow_url,
+        created_at, created_by, updated_at
     ) VALUES (
         source.agent_id, source.name, source.agent_type, source.owner_principal,
         source.description, source.instructions, source.tools_enabled, source.model,
         source.serving_endpoint_name, source.eval_profile,
         source.min_safety_score, source.min_correctness_score,
-        '{next_env}', 'active', source.runtime_mode,
+        '{next_env}', 'active', source.runtime_mode, source.mlflow_experiment_id, source.mlflow_url,
         current_timestamp(), source.owner_principal, current_timestamp()
     )
     """)
-    # Copy tools used by this agent to the destination environment
+
+    # ── 3. Copy tools to destination env ──────────────────────────
     try:
         tools_list = json.loads(row.get("tools_enabled_json") or "[]")
     except Exception:
@@ -499,24 +577,48 @@ def promote_agent(agent_id: str):
                 tool_rows = _rows_to_dicts(tool_resp)
                 if not tool_rows:
                     continue
-                t = tool_rows[0]
-                t_ref  = _esc(t.get("ref") or "")
-                t_desc = _esc(t.get("description") or "")
-                t_owner = _esc(t.get("owner") or "")
+                t        = tool_rows[0]
+                t_kind   = t.get("kind") or ""
+                t_src_ref = t.get("ref") or ""
+                t_desc   = _esc(t.get("description") or "")
+                t_owner  = _esc(t.get("owner") or "")
+
+                # For Genie tools: create the Genie space in the destination workspace.
+                # If space creation fails, skip the tool — don't register a broken ref.
+                if t_kind == "mcp_genie":
+                    try:
+                        src_catalog = prefix_src.split(".")[0]
+                        t_dst_ref = _promote_genie_space(
+                            src_ref=t_src_ref,
+                            src_w=w_src,
+                            target_w=w_dst,
+                            src_catalog=src_catalog,
+                            target_catalog=catalog_dst,
+                            target_warehouse=wh_dst,
+                            target_host=staging_host,
+                        )
+                    except HTTPException as exc:
+                        print(f"[Promote] Genie space para tool '{tool_name}' falhou: {exc.detail}", file=sys.stderr)
+                        continue  # skip — don't register tool without its Genie space
+                else:
+                    t_dst_ref = t_src_ref
+
+                t_ref = _esc(t_dst_ref)
                 _sql(w_dst, wh_dst, f"""
                 MERGE INTO {prefix_dst}.tools_config AS target
                 USING (
                   SELECT
-                    '{_esc(tool_name)}'  AS tool_name,
-                    '{_esc(t.get("kind",""))}' AS kind,
-                    '{t_ref}'            AS ref,
-                    '{t_desc}'           AS description,
-                    '{t_owner}'          AS owner,
-                    '{next_env}'         AS environment
+                    '{_esc(tool_name)}'       AS tool_name,
+                    '{_esc(t_kind)}'          AS kind,
+                    '{t_ref}'                 AS ref,
+                    '{t_desc}'                AS description,
+                    '{t_owner}'               AS owner,
+                    '{next_env}'              AS environment
                 ) AS source
                 ON target.tool_name = source.tool_name
                 WHEN MATCHED THEN UPDATE SET
                     kind        = source.kind,
+                    ref         = source.ref,
                     description = source.description,
                     owner       = source.owner,
                     environment = source.environment,
@@ -531,9 +633,9 @@ def promote_agent(agent_id: str):
                 )
                 """)
             except Exception:
-                pass  # non-critical: tool may not exist in source or schema differs
+                pass  # non-critical
 
-    # Clear approval_requested in source env after promote
+    # ── 4. Clear approval_requested in source env ─────────────────
     try:
         _sql(w_src, wh_src, f"""
             UPDATE {prefix_src}.agents_config
@@ -543,7 +645,12 @@ def promote_agent(agent_id: str):
     except Exception:
         pass  # non-critical
 
-    return {"agent_id": agent_id, "promoted_to": next_env, "tools_promoted": tools_list}
+    return {
+        "agent_id": agent_id,
+        "promoted_to": next_env,
+        "tools_promoted": tools_list,
+        "mlflow_experiment_id": mlflow_experiment_id,
+    }
 
 
 # ── Approval workflow ─────────────────────────────────────────
@@ -578,6 +685,169 @@ def reject_approval(agent_id: str):
         WHERE agent_id = '{_esc(agent_id)}'
     """)
     return {"agent_id": agent_id, "approval_requested": False}
+
+
+# ── Run eval ──────────────────────────────────────────────────
+
+def _run_eval_task(agent_id: str, staging_cfg: dict, dev_prefix: str, dev_cfg: dict) -> None:
+    """Background task: run mlflow.genai.evaluate() against the staging endpoint."""
+    import os
+    import mlflow
+    from mlflow.genai.scorers import Correctness, Safety, Guidelines
+
+    w_staging = _workspace_client_for_env(staging_cfg)
+    wh        = staging_cfg["warehouse_id"]
+    prefix    = f"{staging_cfg['catalog']}.{staging_cfg['schema_name']}"
+
+    try:
+        # Fetch staging agent details
+        resp = _sql(w_staging, wh,
+            f"SELECT serving_endpoint_name, mlflow_experiment_id FROM {prefix}.agents_config "
+            f"WHERE agent_id = '{_esc(agent_id)}' LIMIT 1")
+        row           = _rows_to_dicts(resp)[0]
+        experiment_id = (row.get("mlflow_experiment_id") or "").strip()
+        endpoint      = (row.get("serving_endpoint_name") or "").strip()
+
+        if not experiment_id:
+            raise ValueError("mlflow_experiment_id ausente no staging.")
+
+        # Fetch eval entries from dev
+        w_dev  = _workspace_client_for_env(dev_cfg)
+        wh_dev = dev_cfg["warehouse_id"]
+        eval_resp = _sql(w_dev, wh_dev,
+            f"SELECT request, expected_response FROM {dev_prefix}.eval_datasets "
+            f"WHERE agent_id = '{_esc(agent_id)}' ORDER BY created_at ASC")
+        entries = _rows_to_dicts(eval_resp)
+
+        if not entries:
+            raise ValueError("Dataset de avaliação vazio.")
+
+        # Build eval data in mlflow.genai.evaluate() format
+        eval_data = [
+            {
+                "inputs": {"query": e.get("request") or ""},
+                "expectations": {"expected_response": e.get("expected_response") or ""},
+            }
+            for e in entries
+        ]
+
+        # predict_fn closure — calls staging serving endpoint
+        def predict_fn(query: str) -> dict:
+            if not endpoint:
+                return {"response": "ERRO: endpoint não configurado"}
+            try:
+                result = w_staging.api_client.do(
+                    "POST",
+                    f"/serving-endpoints/{endpoint}/invocations",
+                    body={
+                        "input": [{"role": "user", "content": query}],
+                        "custom_inputs": {"agent_id": agent_id},
+                    },
+                )
+                choices = result.get("choices") or []
+                if choices:
+                    content = (choices[0].get("message") or {}).get("content") or ""
+                    return {"response": content}
+                return {"response": str(result)}
+            except Exception as call_exc:
+                return {"response": f"ERRO: {call_exc}"}
+
+        # Point MLflow to the staging workspace (save/restore env vars)
+        staging_host  = (staging_cfg.get("workspace_url") or "").rstrip("/")
+        staging_token = staging_cfg.get("token") or ""
+        _env_keys = ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET")
+        _orig = {k: os.environ.get(k) for k in _env_keys}
+        try:
+            os.environ["DATABRICKS_HOST"] = staging_host
+            if staging_token:
+                os.environ["DATABRICKS_TOKEN"] = staging_token
+                os.environ.pop("DATABRICKS_CLIENT_ID", None)
+                os.environ.pop("DATABRICKS_CLIENT_SECRET", None)
+            elif settings.databricks_client_id and settings.databricks_client_secret:
+                os.environ["DATABRICKS_CLIENT_ID"]     = settings.databricks_client_id
+                os.environ["DATABRICKS_CLIENT_SECRET"] = settings.databricks_client_secret
+                os.environ.pop("DATABRICKS_TOKEN", None)
+            else:
+                os.environ["DATABRICKS_TOKEN"] = settings.databricks_token or ""
+
+            mlflow.set_tracking_uri("databricks")
+            mlflow.set_experiment(f"/Framework Agents/{agent_id}")
+
+            results = mlflow.genai.evaluate(
+                data=eval_data,
+                predict_fn=predict_fn,
+                scorers=[
+                    Correctness(),
+                    Safety(),
+                    Guidelines(
+                        name="helpful",
+                        guidelines="A resposta deve ser útil e relevante para a pergunta do usuário.",
+                    ),
+                ],
+            )
+            run_id = results.run_id
+            print(f"[Eval] Concluído: agent={agent_id} run_id={run_id} metrics={results.metrics}", file=sys.stderr)
+
+        finally:
+            for k, v in _orig.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+        _sql(w_staging, wh, f"""
+            UPDATE {prefix}.agents_config
+            SET eval_status = 'completed', eval_run_id = '{_esc(run_id)}',
+                updated_at = current_timestamp()
+            WHERE agent_id = '{_esc(agent_id)}'
+        """)
+
+    except Exception as exc:
+        print(f"[Eval] Falha: {exc}", file=sys.stderr)
+        try:
+            _sql(w_staging, wh, f"""
+                UPDATE {prefix}.agents_config
+                SET eval_status = 'failed', updated_at = current_timestamp()
+                WHERE agent_id = '{_esc(agent_id)}'
+            """)
+        except Exception:
+            pass
+
+
+@router.post("/agents/{agent_id}/run-eval")
+def run_eval(agent_id: str, background_tasks: BackgroundTasks):
+    """Trigger async evaluation run for a staging agent."""
+    found = _find_agent(agent_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    _, _, _, env = found
+    if env != "staging":
+        raise HTTPException(status_code=400, detail="Avaliação só pode ser disparada para agentes no staging.")
+
+    staging_parts = _env_client("staging")
+    dev_parts     = _env_client("dev")
+    if staging_parts is None:
+        raise HTTPException(status_code=503, detail="Staging não configurado.")
+    if dev_parts is None:
+        raise HTTPException(status_code=503, detail="Dev não configurado.")
+
+    _, s_catalog, s_schema, s_wh = staging_parts
+    _, d_catalog, d_schema, d_wh = dev_parts
+
+    staging_cfg = {**_get_env_config("staging"), "catalog": s_catalog, "schema_name": s_schema, "warehouse_id": s_wh}
+    dev_cfg     = {**_get_env_config("dev"),     "catalog": d_catalog, "schema_name": d_schema, "warehouse_id": d_wh}
+    dev_prefix  = f"{d_catalog}.{d_schema}"
+
+    # Mark as running immediately (persists across refreshes)
+    w_staging = _workspace_client_for_env(staging_cfg)
+    _sql(w_staging, s_wh, f"""
+        UPDATE {s_catalog}.{s_schema}.agents_config
+        SET eval_status = 'running', eval_run_id = NULL, updated_at = current_timestamp()
+        WHERE agent_id = '{_esc(agent_id)}'
+    """)
+
+    background_tasks.add_task(_run_eval_task, agent_id, staging_cfg, dev_prefix, dev_cfg)
+    return {"agent_id": agent_id, "eval_status": "running"}
 
 
 # ── Chat with agent ───────────────────────────────────────────

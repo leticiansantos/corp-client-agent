@@ -209,15 +209,29 @@ def list_agents(env: str | None = Query(default=None)):
     # Query environments in parallel
     with ThreadPoolExecutor(max_workers=len(envs_to_query)) as executor:
         futures = {executor.submit(_fetch_agents_for_env, e): e for e in envs_to_query}
-        for future in as_completed(futures, timeout=120):
-            try:
-                for rank, row in future.result():
-                    key = row["agent_id"]
-                    current_rank, _ = best.get(key, (-1, {}))
-                    if rank > current_rank:
-                        best[key] = (rank, row)
-            except Exception:
-                pass
+        try:
+            done_iter = as_completed(futures, timeout=30)
+            for future in done_iter:
+                try:
+                    for rank, row in future.result():
+                        key = row["agent_id"]
+                        current_rank, _ = best.get(key, (-1, {}))
+                        if rank > current_rank:
+                            best[key] = (rank, row)
+                except Exception:
+                    pass
+        except TimeoutError:
+            # Some envs didn't respond in time — return what already completed
+            for future in futures:
+                if future.done():
+                    try:
+                        for rank, row in future.result():
+                            key = row["agent_id"]
+                            current_rank, _ = best.get(key, (-1, {}))
+                            if rank > current_rank:
+                                best[key] = (rank, row)
+                    except Exception:
+                        pass
 
     agents = []
     for _, row in sorted(best.values(), key=lambda x: x[0], reverse=True):
@@ -490,12 +504,15 @@ def promote_agent(agent_id: str):
                 get_resp = w_dst.experiments.get_by_name(experiment_name=exp_name)
                 if get_resp and get_resp.experiment:
                     mlflow_experiment_id = get_resp.experiment.experiment_id
-                    # Ensure the GENAI_EXPERIMENT tag is present on recovered experiments
-                    w_dst.experiments.set_experiment_tag(
-                        experiment_id=mlflow_experiment_id,
-                        key="mlflow.experimentType",
-                        value="GENAI_EXPERIMENT",
-                    )
+                    # mlflow.experimentType is a system tag — immutable once set; ignore update errors
+                    try:
+                        w_dst.experiments.set_experiment_tag(
+                            experiment_id=mlflow_experiment_id,
+                            key="mlflow.experimentType",
+                            value="GENAI_EXPERIMENT",
+                        )
+                    except Exception:
+                        pass
                     print(f"[MLflow] Recuperado: experiment_id={mlflow_experiment_id}", file=sys.stderr)
 
             if not mlflow_experiment_id:

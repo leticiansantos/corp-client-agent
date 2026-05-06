@@ -242,15 +242,27 @@ def list_tools():
 
     with ThreadPoolExecutor(max_workers=len(ENVS)) as executor:
         futures = {executor.submit(_fetch_tools_for_env, env): env for env in ENVS}
-        for future in as_completed(futures, timeout=120):
-            try:
-                for rank, row in future.result():
-                    key = row["tool_name"]
-                    current_rank, _ = best.get(key, (-1, {}))
-                    if rank > current_rank:
-                        best[key] = (rank, row)
-            except Exception:
-                pass
+        try:
+            for future in as_completed(futures, timeout=30):
+                try:
+                    for rank, row in future.result():
+                        key = row["tool_name"]
+                        current_rank, _ = best.get(key, (-1, {}))
+                        if rank > current_rank:
+                            best[key] = (rank, row)
+                except Exception:
+                    pass
+        except TimeoutError:
+            for future in futures:
+                if future.done():
+                    try:
+                        for rank, row in future.result():
+                            key = row["tool_name"]
+                            current_rank, _ = best.get(key, (-1, {}))
+                            if rank > current_rank:
+                                best[key] = (rank, row)
+                    except Exception:
+                        pass
 
     all_tools = [row for _, row in sorted(best.values(), key=lambda x: (-x[0], x[1].get("tool_name", "")))]
     return {"tools": all_tools}

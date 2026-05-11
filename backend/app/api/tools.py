@@ -63,18 +63,24 @@ def _get_env_config(env: str) -> dict:
 
 
 def _workspace_client_for_env(cfg: dict) -> WorkspaceClient:
-    """Build a WorkspaceClient from an env config dict. Falls back to .env credentials."""
+    """Build a WorkspaceClient from an env config dict. Falls back to .env credentials.
+
+    auth_type is always set explicitly to prevent the SDK from picking up conflicting
+    credentials from env vars (DATABRICKS_CLIENT_ID/SECRET injected by Databricks Apps
+    for the app's own M2M OAuth) when creating a PAT-based client for another workspace.
+    """
     host  = (cfg.get("workspace_url") or settings.databricks_host).rstrip("/")
     token = cfg.get("token") or ""
     if token:
-        return WorkspaceClient(host=host, token=token)
+        return WorkspaceClient(host=host, token=token, auth_type="pat")
     if settings.databricks_client_id and settings.databricks_client_secret:
         return WorkspaceClient(
             host=host,
             client_id=settings.databricks_client_id,
             client_secret=settings.databricks_client_secret,
+            auth_type="oauth-m2m",
         )
-    return WorkspaceClient(host=host, token=settings.databricks_token)
+    return WorkspaceClient(host=host, token=settings.databricks_token, auth_type="pat")
 
 
 def _env_client(env: str) -> tuple[WorkspaceClient, str, str, str] | None:

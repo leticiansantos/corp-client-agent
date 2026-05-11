@@ -83,9 +83,12 @@ def _get_env_config_from_db(env: str) -> dict | None:
 
 
 def _get_env_workspace_client(env_cfg: dict) -> _WorkspaceClient:
+    # Force PAT auth to prevent conflict with DATABRICKS_CLIENT_ID/SECRET env vars
+    # injected by Databricks Apps for the app's own M2M OAuth credentials.
     return _WorkspaceClient(
         host=env_cfg["workspace_url"],
         token=env_cfg["token"],
+        auth_type="pat",
     )
 
 
@@ -95,8 +98,11 @@ def _check_endpoint_state(w: _WorkspaceClient, endpoint_name: str) -> str:
         if ep.state and ep.state.ready:
             return "READY" if "READY" in str(ep.state.ready).upper() else "NOT_READY"
         return "NOT_READY"
-    except Exception:
-        return "NOT_FOUND"
+    except Exception as exc:
+        err = str(exc).lower()
+        if any(s in err for s in ("does not exist", "not found", "no such", "404")):
+            return "NOT_FOUND"
+        raise  # propagate auth/network errors to _fetch_endpoint_for_env
 
 
 def _check_active_deploy_job(w: _WorkspaceClient, endpoint_name: str) -> bool:
@@ -149,7 +155,7 @@ def _env_sql(w: _WorkspaceClient, warehouse_id: str, statement: str) -> None:
 def _build_whl() -> str:
     """Build corp_agent_framework WHL from local source. Returns local .whl path."""
     framework_dir = _os.path.abspath(
-        _os.path.join(_os.path.dirname(__file__), "../../../../corp-agent-framework")
+        _os.path.join(_os.path.dirname(__file__), "../../../corp-agent-framework")
     )
     if not _os.path.isdir(framework_dir):
         raise RuntimeError(

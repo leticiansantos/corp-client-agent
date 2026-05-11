@@ -1,4 +1,30 @@
+# Dependencies
 node_modules/
+frontend/node_modules/
+
+# Build output
 dist/
+frontend/dist/
+backend/static/
+
+# Environment files
 .env
 *.local
+frontend/.env
+backend/.env
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+backend/.venv/
+.venv/
+
+# Deploy artifacts
+wheels/
+corp-agent-framework/
+
+# Databricks sync state
+.databricks/

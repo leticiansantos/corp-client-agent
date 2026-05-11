@@ -78,7 +78,6 @@ export default function Tools() {
   const [kindFilter, setKindFilter] = useState<ToolKind | "all">("all");
   const [activeTab, setActiveTab] = useState<"tools" | "admin">("tools");
   const [promoting, setPromoting] = useState<Record<string, boolean>>({});
-  const [promoteMsg, setPromoteMsg] = useState<Record<string, string>>({});
   const [deleting, setDeleting]     = useState<Record<string, boolean>>({});
   const [deleteMsg, setDeleteMsg]   = useState<Record<string, string>>({});
   const [promoting2, setPromoting2] = useState<Record<string, boolean>>({});
@@ -422,20 +421,12 @@ export default function Tools() {
   // ── Promote / reject tool ────────────────────────────────────
   async function handlePromote(tool_name: string, new_status: "active" | "inactive") {
     setPromoting((p) => ({ ...p, [tool_name]: true }));
-    setPromoteMsg((m) => ({ ...m, [tool_name]: "" }));
     try {
       await api.patch(`/tools/${encodeURIComponent(tool_name)}/status`, { new_status });
       const res = await api.get<{ tools: Tool[] }>("/tools");
       setTools(res.data.tools);
-      setPromoteMsg((m) => ({
-        ...m,
-        [tool_name]: new_status === "active" ? "Aprovada!" : "Rejeitada",
-      }));
     } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data
-          ?.detail ?? "Erro ao atualizar status.";
-      setPromoteMsg((m) => ({ ...m, [tool_name]: `Erro: ${msg}` }));
+      console.error("Erro ao atualizar status:", err);
     } finally {
       setPromoting((p) => ({ ...p, [tool_name]: false }));
     }

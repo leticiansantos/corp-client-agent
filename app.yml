@@ -1,0 +1,20 @@
+command:
+  - bash
+  - -c
+  - cd backend && /app/python/source_code/.venv/bin/python3_apps -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+env:
+  - name: DATABRICKS_HOST
+    value: "https://fevm-leticia-santos-stable.cloud.databricks.com"
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "f6f77d6e53e9ddda"
+  - name: APP_CATALOG
+    value: "leticia_santos_stable_catalog"
+  - name: APP_SCHEMA
+    value: "corp_agent_client"
+  - name: LOCAL_DEV
+    value: "false"
+  - name: CORS_ORIGINS
+    value: '["https://corp-client-agent-7474658353922350.aws.databricksapps.com"]'
+  # DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET are injected automatically
+  # by Databricks Apps from the service principal bound to the app.

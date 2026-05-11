@@ -1,0 +1,16 @@
+frontend/node_modules
+frontend/dist
+frontend/.env
+backend/.venv
+backend/__pycache__
+backend/.env
+corp-agent-framework/build
+corp-agent-framework/docs
+corp-agent-framework/notebooks
+corp-agent-framework/tests
+corp-agent-framework/.git
+wheels
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.git

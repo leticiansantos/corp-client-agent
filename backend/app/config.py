@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     framework_catalog: str = "corp_agent_framework"
     framework_schema: str = "agents"
 
+    # Lakebase (PostgreSQL) — single DB for all environments
+    lakebase_host: str = ""                          # LAKEBASE_HOST (endpoint DNS)
+    lakebase_database: str = "databricks_postgres"   # LAKEBASE_DATABASE
+    lakebase_username: str = ""                      # LAKEBASE_USERNAME (Databricks user email)
+
     # Set to true when running locally to skip WHL rebuild if already in Volume
     local_dev: bool = False
 

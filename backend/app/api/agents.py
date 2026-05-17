@@ -1,12 +1,10 @@
 """
 Agents registry API.
 
-Each environment's agents_config lives in that environment's own workspace:
-  dev     → {dev_catalog}.{dev_schema}.agents_config
-  staging → {staging_catalog}.{staging_schema}.agents_config
-  prod    → {prod_catalog}.{prod_schema}.agents_config
-
-New agents are always registered in dev with status='draft'.
+agents_config and eval_datasets live in a single Lakebase (PostgreSQL) database.
+The `environment` column (dev / staging / prod) is a lifecycle flag — promotion is an
+UPDATE, not a record copy. Workspace API calls (MLflow, serving endpoints) still go to
+each env's workspace.
 
 Column mapping (framework schema uses 'name', not 'agent_name'):
   DB column  ↔  API/frontend field
@@ -15,17 +13,16 @@ Column mapping (framework schema uses 'name', not 'agent_name'):
 
 import json
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import uuid as _uuid
 
-from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.ml import ExperimentTag
 import time as _time
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 from pydantic import BaseModel
 
-from app.api.db import _execute_sql, _rows_to_dicts, _esc
-from app.api.tools import _env_client, _get_env_config, _sql, _ENVS_DESC, _ENV_RANK, _ensure_tools_table, _workspace_client_for_env, _promote_genie_space
+from app.api import lakebase
+from app.api.tools import _env_client, _get_env_config, _sql, _workspace_client_for_env, _promote_genie_space
 from app.config import settings
 
 router = APIRouter(prefix="/api")
@@ -34,8 +31,6 @@ ENVS = ("dev", "staging", "prod")
 
 VALID_STATUSES = {"active", "disabled"}
 
-# Virtual status is derived from the environment at read time.
-# The DB always stores 'active'; 'disabled' is the only real status change possible.
 _ENV_VIRTUAL_STATUS = {
     "dev":     "draft",
     "staging": "evaluating",
@@ -44,229 +39,78 @@ _ENV_VIRTUAL_STATUS = {
 
 _ENV_NEXT = {"dev": "staging", "staging": "prod"}
 
-# Framework's existing schema uses 'name', not 'agent_name'.
-# We CREATE with 'name' so new tables match the framework convention.
-_AGENTS_CONFIG_DDL = """
-    CREATE TABLE IF NOT EXISTS {prefix}.agents_config (
-        agent_id              STRING NOT NULL,
-        name                  STRING NOT NULL,
-        description           STRING,
-        model                 STRING,
-        tools_enabled         ARRAY<STRING>,
-        status                STRING NOT NULL,
-        environment           STRING,
-        runtime_mode          STRING,
-        eval_profile          STRING,
-        min_safety_score      DOUBLE,
-        min_correctness_score DOUBLE,
-        created_at            TIMESTAMP,
-        created_by            STRING,
-        updated_at            TIMESTAMP
-    )
-    USING DELTA
-    COMMENT 'Registro de agents do corp-agent-framework.'
-"""
-
-# Columns that may be missing from older tables created by the framework
-_MIGRATIONS = [
-    "ADD COLUMN environment             STRING",
-    "ADD COLUMN runtime_mode            STRING",
-    "ADD COLUMN created_by              STRING",
-    "ADD COLUMN updated_at              TIMESTAMP",
-    "ADD COLUMN eval_profile            STRING",
-    "ADD COLUMN min_safety_score        DOUBLE",
-    "ADD COLUMN min_correctness_score   DOUBLE",
-    # Framework columns that may be missing on older tables
-    "ADD COLUMN serving_endpoint_name   STRING",
-    # Extra columns our client layer adds
-    "ADD COLUMN agent_type              STRING",
-    "ADD COLUMN owner_principal         STRING",
-    "ADD COLUMN instructions            STRING",
-    # Approval workflow
-    "ADD COLUMN approval_requested      BOOLEAN",
-    # MLflow experiment linked at promote-to-staging time
-    "ADD COLUMN mlflow_experiment_id    STRING",
-    "ADD COLUMN mlflow_url              STRING",
-    # Eval run tracking
-    "ADD COLUMN eval_run_id             STRING",
-    "ADD COLUMN eval_status             STRING",
-]
-
-
-def _ensure_agents_table(w: WorkspaceClient, warehouse_id: str, prefix: str) -> None:
-    """Create schema + agents_config table if they don't exist, and migrate missing columns."""
-    try:
-        _sql(w, warehouse_id, f"CREATE SCHEMA IF NOT EXISTS {prefix}")
-    except Exception:
-        pass
-    _sql(w, warehouse_id, _AGENTS_CONFIG_DDL.format(prefix=prefix))
-    for migration in _MIGRATIONS:
-        try:
-            _sql(w, warehouse_id, f"ALTER TABLE {prefix}.agents_config {migration}")
-        except Exception:
-            pass  # column already exists → ok
-    # Migrate existing 'draft' agents to 'active' so the framework can load them
-    try:
-        _sql(w, warehouse_id,
-             f"UPDATE {prefix}.agents_config SET status = 'active' WHERE status = 'draft'")
-    except Exception:
-        pass
-
-
-def _find_agent(agent_id: str) -> tuple[WorkspaceClient, str, str, str] | None:
-    """Search prod→staging→dev, return (w, warehouse_id, prefix, env) for highest env containing the agent."""
-    for env in _ENVS_DESC:
-        parts = _env_client(env)
-        if parts is None:
-            continue
-        w, catalog, schema_name, warehouse_id = parts
-        prefix = f"{catalog}.{schema_name}"
-        try:
-            resp = _sql(w, warehouse_id,
-                f"SELECT agent_id FROM {prefix}.agents_config WHERE agent_id = '{_esc(agent_id)}'")
-            rows = _rows_to_dicts(resp)
-            if rows:
-                return w, warehouse_id, prefix, env
-        except Exception:
-            continue
-    return None
-
-
-# ── List agents ───────────────────────────────────────────────
-
-# Cache: prefixes whose late-added columns have already been migrated this run.
-# ALTER TABLE is idempotent but slow — skip after first successful migration.
-_agents_col_migrated: set[str] = set()
-
-_LATE_AGENT_COLS = (
-    "ADD COLUMN approval_requested   BOOLEAN",
-    "ADD COLUMN mlflow_experiment_id STRING",
-    "ADD COLUMN mlflow_url           STRING",
-    "ADD COLUMN eval_run_id          STRING",
-    "ADD COLUMN eval_status          STRING",
-)
-
-
-def _fetch_agents_for_env(env: str) -> list[tuple[int, dict]]:
-    """Query agents for one environment. Returns [(rank, row), ...] or []."""
-    parts = _env_client(env)
-    if parts is None:
-        return []
-    w, catalog, schema_name, warehouse_id = parts
-    prefix = f"{catalog}.{schema_name}"
-    rank = _ENV_RANK.get(env, 0)
-
-    # Run late-added column migrations only once per prefix per server start
-    if prefix not in _agents_col_migrated:
-        for col_ddl in _LATE_AGENT_COLS:
-            try:
-                _sql(w, warehouse_id, f"ALTER TABLE {prefix}.agents_config {col_ddl}")
-            except Exception:
-                pass  # column already exists or table doesn't exist yet
-        _agents_col_migrated.add(prefix)
-
-    try:
-        resp = _sql(w, warehouse_id, f"""
-            SELECT agent_id,
-                   name            AS agent_name,
-                   agent_type,
-                   owner_principal,
-                   description,
-                   instructions,
-                   to_json(tools_enabled) AS tools_enabled,
-                   model,
-                   serving_endpoint_name,
-                   eval_profile,
-                   min_safety_score,
-                   min_correctness_score,
-                   environment,
-                   status,
-                   runtime_mode,
-                   approval_requested,
-                   mlflow_experiment_id,
-                   mlflow_url,
-                   eval_run_id,
-                   eval_status,
-                   created_at,
-                   updated_at
-            FROM {prefix}.agents_config
-            ORDER BY created_at DESC
-        """)
-        rows = _rows_to_dicts(resp)
-        for row in rows:
-            row["environment"] = row.get("environment") or env
-        return [(rank, row) for row in rows if row.get("agent_id")]
-    except Exception:
-        return []
-
-
-@router.get("/agents")
-def list_agents(env: str | None = Query(default=None)):
-    """Aggregate agents from configured envs. When env is given, only that env is queried."""
-    envs_to_query = [env] if env in ENVS else list(ENVS)
-    best: dict[str, tuple[int, dict]] = {}
-
-    # Query environments in parallel
-    with ThreadPoolExecutor(max_workers=len(envs_to_query)) as executor:
-        futures = {executor.submit(_fetch_agents_for_env, e): e for e in envs_to_query}
-        try:
-            done_iter = as_completed(futures, timeout=30)
-            for future in done_iter:
-                try:
-                    for rank, row in future.result():
-                        key = row["agent_id"]
-                        current_rank, _ = best.get(key, (-1, {}))
-                        if rank > current_rank:
-                            best[key] = (rank, row)
-                except Exception:
-                    pass
-        except TimeoutError:
-            # Some envs didn't respond in time — return what already completed
-            for future in futures:
-                if future.done():
-                    try:
-                        for rank, row in future.result():
-                            key = row["agent_id"]
-                            current_rank, _ = best.get(key, (-1, {}))
-                            if rank > current_rank:
-                                best[key] = (rank, row)
-                    except Exception:
-                        pass
-
-    agents = []
-    for _, row in sorted(best.values(), key=lambda x: x[0], reverse=True):
-        te = row.get("tools_enabled")
-        if isinstance(te, str):
-            try:
-                row["tools_enabled"] = json.loads(te)
-            except Exception:
-                row["tools_enabled"] = []
-        elif te is None:
-            row["tools_enabled"] = []
-        # Map environment to virtual status; keep 'disabled' as-is
-        if row.get("status") != "disabled":
-            env = row.get("environment", "dev")
-            approval_req = row.get("approval_requested")
-            if env == "dev" and approval_req in (True, "true", 1, "1"):
-                row["status"] = "pending_approval"
-            else:
-                row["status"] = _ENV_VIRTUAL_STATUS.get(env, "draft")
-        agents.append(row)
-
-    return {"agents": agents}
-
-
-# ── Register agent ────────────────────────────────────────────
-
 _FRAMEWORK_ENDPOINT = "corp-config-driven-agent-dev"
 
-# Framework serving endpoint name per environment
 _ENV_FRAMEWORK_ENDPOINT = {
     "dev":     "corp-config-driven-agent-dev",
     "staging": "corp-config-driven-agent-staging",
     "prod":    "corp-config-driven-agent",
 }
 
+
+# ── Internal helpers ──────────────────────────────────────────
+
+def _find_agent(agent_id: str) -> dict | None:
+    """Return the agent row from Lakebase, or None if not found."""
+    return lakebase.execute_one(
+        "SELECT * FROM agents_config WHERE agent_id = %s", (agent_id,)
+    )
+
+
+def _row_to_api(row: dict) -> dict:
+    """Normalize a Lakebase row for the API: map name→agent_name, compute virtual status."""
+    row = dict(row)
+    row["agent_name"] = row.pop("name", "") or ""
+    # tools_enabled is TEXT[] → already a Python list from psycopg3
+    if row.get("tools_enabled") is None:
+        row["tools_enabled"] = []
+    # Map environment to virtual status; keep 'disabled' as-is
+    if row.get("status") != "disabled":
+        env = row.get("environment", "dev")
+        if env == "dev" and row.get("approval_requested") in (True,):
+            row["status"] = "pending_approval"
+        else:
+            row["status"] = _ENV_VIRTUAL_STATUS.get(env, "draft")
+    return row
+
+
+# ── List agents ───────────────────────────────────────────────
+
+@router.get("/agents")
+def list_agents(env: str | None = Query(default=None)):
+    """Return all agents, optionally filtered by environment."""
+    if env and env in ENVS:
+        rows = lakebase.execute(
+            """
+            SELECT agent_id, name, agent_type, owner_principal, description, instructions,
+                   tools_enabled, model, serving_endpoint_name, eval_profile,
+                   min_safety_score, min_correctness_score, environment, status,
+                   runtime_mode, approval_requested, mlflow_experiment_id, mlflow_url,
+                   eval_run_id, eval_status, created_at, updated_at
+            FROM agents_config
+            WHERE environment = %s
+            ORDER BY created_at DESC
+            """,
+            (env,),
+        )
+    else:
+        rows = lakebase.execute(
+            """
+            SELECT agent_id, name, agent_type, owner_principal, description, instructions,
+                   tools_enabled, model, serving_endpoint_name, eval_profile,
+                   min_safety_score, min_correctness_score, environment, status,
+                   runtime_mode, approval_requested, mlflow_experiment_id, mlflow_url,
+                   eval_run_id, eval_status, created_at, updated_at
+            FROM agents_config
+            ORDER BY
+                CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
+                created_at DESC
+            """
+        )
+    return {"agents": [_row_to_api(r) for r in rows]}
+
+
+# ── Register agent ────────────────────────────────────────────
 
 class RegisterAgentRequest(BaseModel):
     agent_id: str
@@ -285,78 +129,44 @@ class RegisterAgentRequest(BaseModel):
 
 @router.post("/agents", status_code=status.HTTP_201_CREATED)
 def register_agent(body: RegisterAgentRequest):
-    """Register a new agent into the dev environment's agents_config."""
-    parts = _env_client("dev")
-    if parts is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Ambiente dev não configurado em Settings.",
+    """Register a new agent in Lakebase with environment='dev'."""
+    lakebase.execute(
+        """
+        INSERT INTO agents_config (
+            agent_id, name, agent_type, owner_principal, description, instructions,
+            tools_enabled, model, serving_endpoint_name, eval_profile,
+            min_safety_score, min_correctness_score,
+            environment, status, runtime_mode, created_at, created_by, updated_at
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s,
+            'dev', 'active', %s, NOW(), %s, NOW()
         )
-    w, catalog, schema_name, warehouse_id = parts
-    prefix = f"{catalog}.{schema_name}"
-
-    dev_cfg = _get_env_config("dev")
-    if not dev_cfg.get("catalog") or not dev_cfg.get("schema_name"):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Catalog e schema_name não configurados para o ambiente dev. Configure em Settings → Workspace Dev.",
-        )
-
-    _ensure_agents_table(w, warehouse_id, prefix)
-
-    tools_json  = json.dumps(body.tools_enabled).replace("'", "\\'")
-    min_safety  = str(body.min_safety_score)         if body.min_safety_score         is not None else "NULL"
-    min_correct = str(body.min_correctness_score)    if body.min_correctness_score    is not None else "NULL"
-
-    _sql(w, warehouse_id, f"""
-    MERGE INTO {prefix}.agents_config AS target
-    USING (
-      SELECT
-        '{_esc(body.agent_id)}'        AS agent_id,
-        '{_esc(body.agent_name)}'      AS name,
-        '{_esc(body.agent_type)}'      AS agent_type,
-        '{_esc(body.owner_principal)}' AS owner_principal,
-        '{_esc(body.description)}'     AS description,
-        '{_esc(body.instructions)}'    AS instructions,
-        from_json('{tools_json}', 'array<string>') AS tools_enabled,
-        '{_esc(body.model)}'           AS model,
-        '{_FRAMEWORK_ENDPOINT}'        AS serving_endpoint_name,
-        '{_esc(body.eval_profile)}'    AS eval_profile,
-        {min_safety}                   AS min_safety_score,
-        {min_correct}                  AS min_correctness_score,
-        'dev'                          AS environment,
-        '{_esc(body.runtime_mode)}'    AS runtime_mode
-    ) AS source
-    ON target.agent_id = source.agent_id
-    WHEN MATCHED THEN UPDATE SET
-        name                  = source.name,
-        agent_type            = source.agent_type,
-        owner_principal       = source.owner_principal,
-        description           = source.description,
-        instructions          = source.instructions,
-        tools_enabled         = from_json('{tools_json}', 'array<string>'),
-        model                 = source.model,
-        serving_endpoint_name = '{_FRAMEWORK_ENDPOINT}',
-        eval_profile          = source.eval_profile,
-        min_safety_score      = source.min_safety_score,
-        min_correctness_score = source.min_correctness_score,
-        runtime_mode          = source.runtime_mode,
-        status                = 'active',
-        updated_at            = current_timestamp()
-    WHEN NOT MATCHED THEN INSERT (
-        agent_id, name, agent_type, owner_principal, description, instructions,
-        tools_enabled, model, serving_endpoint_name, eval_profile,
-        min_safety_score, min_correctness_score,
-        environment, status, runtime_mode, created_at, created_by, updated_at
-    ) VALUES (
-        source.agent_id, source.name, source.agent_type, source.owner_principal,
-        source.description, source.instructions, source.tools_enabled, source.model,
-        source.serving_endpoint_name, source.eval_profile,
-        source.min_safety_score, source.min_correctness_score,
-        'dev', 'active', source.runtime_mode,
-        current_timestamp(), source.owner_principal, current_timestamp()
+        ON CONFLICT (agent_id) DO UPDATE SET
+            name                  = EXCLUDED.name,
+            agent_type            = EXCLUDED.agent_type,
+            owner_principal       = EXCLUDED.owner_principal,
+            description           = EXCLUDED.description,
+            instructions          = EXCLUDED.instructions,
+            tools_enabled         = EXCLUDED.tools_enabled,
+            model                 = EXCLUDED.model,
+            serving_endpoint_name = EXCLUDED.serving_endpoint_name,
+            eval_profile          = EXCLUDED.eval_profile,
+            min_safety_score      = EXCLUDED.min_safety_score,
+            min_correctness_score = EXCLUDED.min_correctness_score,
+            runtime_mode          = EXCLUDED.runtime_mode,
+            status                = 'active',
+            updated_at            = NOW()
+        """,
+        (
+            body.agent_id, body.agent_name, body.agent_type, body.owner_principal,
+            body.description, body.instructions,
+            body.tools_enabled, body.model, _FRAMEWORK_ENDPOINT, body.eval_profile,
+            body.min_safety_score, body.min_correctness_score,
+            body.runtime_mode, body.owner_principal,
+        ),
     )
-    """)
     return {"agent_id": body.agent_id, "status": "draft", "environment": "dev"}
 
 
@@ -379,46 +189,42 @@ class UpdateAgentRequest(BaseModel):
 
 @router.put("/agents/{agent_id}")
 def update_agent(agent_id: str, body: UpdateAgentRequest):
-    """Update an existing agent."""
-    found = _find_agent(agent_id)
-    if found is None:
+    """Update an existing agent in Lakebase."""
+    agent = _find_agent(agent_id)
+    if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    w, warehouse_id, prefix, env = found
 
-    updates = []
-    if body.agent_name is not None:
-        updates.append(f"name = '{_esc(body.agent_name)}'")          # DB column is 'name'
-    if body.agent_type is not None:
-        updates.append(f"agent_type = '{_esc(body.agent_type)}'")
-    if body.owner_principal is not None:
-        updates.append(f"owner_principal = '{_esc(body.owner_principal)}'")
-    if body.description is not None:
-        updates.append(f"description = '{_esc(body.description)}'")
-    if body.instructions is not None:
-        updates.append(f"instructions = '{_esc(body.instructions)}'")
-    if body.tools_enabled is not None:
-        te_json = json.dumps(body.tools_enabled).replace("'", "\\'")
-        updates.append(f"tools_enabled = from_json('{te_json}', 'array<string>')")
-    if body.model is not None:
-        updates.append(f"model = '{_esc(body.model)}'")
-    if body.serving_endpoint_name is not None:
-        updates.append(f"serving_endpoint_name = '{_esc(body.serving_endpoint_name)}'")
-    if body.eval_profile is not None:
-        updates.append(f"eval_profile = '{_esc(body.eval_profile)}'")
-    if body.min_safety_score is not None:
-        updates.append(f"min_safety_score = {body.min_safety_score}")
-    if body.min_correctness_score is not None:
-        updates.append(f"min_correctness_score = {body.min_correctness_score}")
-    if body.runtime_mode is not None:
-        updates.append(f"runtime_mode = '{_esc(body.runtime_mode)}'")
-    updates.append("updated_at = current_timestamp()")
+    field_map = [
+        ("agent_name",            "name"),
+        ("agent_type",            "agent_type"),
+        ("owner_principal",       "owner_principal"),
+        ("description",           "description"),
+        ("instructions",          "instructions"),
+        ("tools_enabled",         "tools_enabled"),
+        ("model",                 "model"),
+        ("serving_endpoint_name", "serving_endpoint_name"),
+        ("eval_profile",          "eval_profile"),
+        ("min_safety_score",      "min_safety_score"),
+        ("min_correctness_score", "min_correctness_score"),
+        ("runtime_mode",          "runtime_mode"),
+    ]
+    set_clauses, params = [], []
+    for body_field, col in field_map:
+        val = getattr(body, body_field, None)
+        if val is not None:
+            set_clauses.append(f"{col} = %s")
+            params.append(val)
 
-    _sql(w, warehouse_id, f"""
-        UPDATE {prefix}.agents_config
-        SET {', '.join(updates)}
-        WHERE agent_id = '{_esc(agent_id)}'
-    """)
-    return {"agent_id": agent_id, "environment": env}
+    if not set_clauses:
+        return {"agent_id": agent_id, "environment": agent.get("environment", "dev")}
+
+    set_clauses.append("updated_at = NOW()")
+    params.append(agent_id)
+    lakebase.execute(
+        f"UPDATE agents_config SET {', '.join(set_clauses)} WHERE agent_id = %s",
+        tuple(params),
+    )
+    return {"agent_id": agent_id, "environment": agent.get("environment", "dev")}
 
 
 # ── Update status ─────────────────────────────────────────────
@@ -431,54 +237,39 @@ class UpdateStatusRequest(BaseModel):
 def update_agent_status(agent_id: str, body: UpdateStatusRequest):
     if body.new_status not in VALID_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status inválido: '{body.new_status}'.")
-    found = _find_agent(agent_id)
-    if found is None:
+    agent = _find_agent(agent_id)
+    if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    w, warehouse_id, prefix, env = found
-    _sql(w, warehouse_id, f"""
-        UPDATE {prefix}.agents_config
-        SET status = '{_esc(body.new_status)}', updated_at = current_timestamp()
-        WHERE agent_id = '{_esc(agent_id)}'
-    """)
-    return {"agent_id": agent_id, "new_status": body.new_status, "environment": env}
+    lakebase.execute(
+        "UPDATE agents_config SET status = %s, updated_at = NOW() WHERE agent_id = %s",
+        (body.new_status, agent_id),
+    )
+    return {"agent_id": agent_id, "new_status": body.new_status, "environment": agent.get("environment", "dev")}
 
 
 # ── Promote agent ─────────────────────────────────────────────
 
 @router.post("/agents/{agent_id}/promote")
 def promote_agent(agent_id: str):
-    """Copy agent config to the next environment (dev→staging or staging→prod)."""
-    found = _find_agent(agent_id)
-    if found is None:
+    """Promote agent to the next environment (dev→staging or staging→prod)."""
+    agent = _find_agent(agent_id)
+    if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    w_src, wh_src, prefix_src, env_src = found
 
+    env_src  = agent.get("environment") or "dev"
     next_env = _ENV_NEXT.get(env_src)
     if not next_env:
         raise HTTPException(status_code=400, detail="Agente já está no ambiente prod.")
 
-    parts = _env_client(next_env)
-    if parts is None:
+    src_parts = _env_client(env_src)
+    dst_parts = _env_client(next_env)
+    if dst_parts is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Ambiente '{next_env}' não configurado em Settings.",
         )
-    w_dst, catalog_dst, schema_dst, wh_dst = parts
-    prefix_dst = f"{catalog_dst}.{schema_dst}"
-
-    resp = _sql(w_src, wh_src, f"""
-        SELECT name, agent_type, owner_principal, description, instructions,
-               to_json(tools_enabled) AS tools_enabled_json,
-               model, serving_endpoint_name, eval_profile,
-               min_safety_score, min_correctness_score, runtime_mode
-        FROM {prefix_src}.agents_config
-        WHERE agent_id = '{_esc(agent_id)}'
-        LIMIT 1
-    """)
-    rows = _rows_to_dicts(resp)
-    if not rows:
-        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    row = rows[0]
+    w_dst, catalog_dst, schema_dst, wh_dst = dst_parts
+    staging_host = (_get_env_config(next_env).get("workspace_url") or "").rstrip("/") if next_env == "staging" else ""
 
     # ── 1. Register MLflow experiment BEFORE writing to staging ──
     mlflow_experiment_id: str | None = None
@@ -486,12 +277,10 @@ def promote_agent(agent_id: str):
         exp_name = f"/Framework Agents/{agent_id}"
         print(f"[MLflow] Criando experimento '{exp_name}' no staging...", file=sys.stderr)
         try:
-            # Ensure parent directory exists in the staging workspace
-            w_dst.workspace.mkdirs(path="/Framework Agents")
-        except Exception as mk_exc:
-            print(f"[MLflow] mkdirs aviso: {mk_exc}", file=sys.stderr)
-        try:
-            # Create experiment (or recover existing)
+            try:
+                w_dst.workspace.mkdirs(path="/Framework Agents")
+            except Exception as mk_exc:
+                print(f"[MLflow] mkdirs aviso: {mk_exc}", file=sys.stderr)
             try:
                 create_resp = w_dst.experiments.create_experiment(
                     name=exp_name,
@@ -504,7 +293,6 @@ def promote_agent(agent_id: str):
                 get_resp = w_dst.experiments.get_by_name(experiment_name=exp_name)
                 if get_resp and get_resp.experiment:
                     mlflow_experiment_id = get_resp.experiment.experiment_id
-                    # mlflow.experimentType is a system tag — immutable once set; ignore update errors
                     try:
                         w_dst.experiments.set_experiment_tag(
                             experiment_id=mlflow_experiment_id,
@@ -514,183 +302,75 @@ def promote_agent(agent_id: str):
                     except Exception:
                         pass
                     print(f"[MLflow] Recuperado: experiment_id={mlflow_experiment_id}", file=sys.stderr)
-
             if not mlflow_experiment_id:
                 raise ValueError("experiment_id não retornado após create/get_by_name.")
-
         except Exception as exc:
-            print(f"[MLflow] Falha: {exc}", file=sys.stderr)
             raise HTTPException(
                 status_code=400,
                 detail=f"Falha ao registrar experimento MLflow no staging: {exc}",
             )
-        if not mlflow_experiment_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Falha ao registrar experimento MLflow no staging: experiment_id não retornado.",
-            )
 
-    # ── 2. Write agent config to destination env ──────────────────
-    _ensure_agents_table(w_dst, wh_dst, prefix_dst)
-
-    tools_json  = (row.get("tools_enabled_json") or "[]").replace("'", "\\'")
-    min_safety  = str(row["min_safety_score"])      if row.get("min_safety_score")      is not None else "NULL"
-    min_correct = str(row["min_correctness_score"]) if row.get("min_correctness_score") is not None else "NULL"
-    endpoint    = _ENV_FRAMEWORK_ENDPOINT.get(next_env, _FRAMEWORK_ENDPOINT)
-    mlflow_col  = f"'{_esc(mlflow_experiment_id)}'" if mlflow_experiment_id else "NULL"
-
-    staging_host = (_get_env_config(next_env).get("workspace_url") or "").rstrip("/") if next_env == "staging" else ""
-    mlflow_url_val = f"{staging_host}/ml/experiments/{mlflow_experiment_id}" if (mlflow_experiment_id and staging_host) else None
-    mlflow_url_col = f"'{_esc(mlflow_url_val)}'" if mlflow_url_val else "NULL"
-
-    _sql(w_dst, wh_dst, f"""
-    MERGE INTO {prefix_dst}.agents_config AS target
-    USING (
-      SELECT
-        '{_esc(agent_id)}'                      AS agent_id,
-        '{_esc(row.get("name",""))}'             AS name,
-        '{_esc(row.get("agent_type",""))}'       AS agent_type,
-        '{_esc(row.get("owner_principal",""))}'  AS owner_principal,
-        '{_esc(row.get("description",""))}'      AS description,
-        '{_esc(row.get("instructions",""))}'     AS instructions,
-        from_json('{tools_json}', 'array<string>') AS tools_enabled,
-        '{_esc(row.get("model",""))}'            AS model,
-        '{_esc(endpoint)}'                       AS serving_endpoint_name,
-        '{_esc(row.get("eval_profile",""))}'     AS eval_profile,
-        {min_safety}                             AS min_safety_score,
-        {min_correct}                            AS min_correctness_score,
-        '{_esc(row.get("runtime_mode",""))}'     AS runtime_mode,
-        {mlflow_col}                             AS mlflow_experiment_id,
-        {mlflow_url_col}                         AS mlflow_url
-    ) AS source
-    ON target.agent_id = source.agent_id
-    WHEN MATCHED THEN UPDATE SET
-        name                  = source.name,
-        agent_type            = source.agent_type,
-        owner_principal       = source.owner_principal,
-        description           = source.description,
-        instructions          = source.instructions,
-        tools_enabled         = source.tools_enabled,
-        model                 = source.model,
-        serving_endpoint_name = source.serving_endpoint_name,
-        eval_profile          = source.eval_profile,
-        min_safety_score      = source.min_safety_score,
-        min_correctness_score = source.min_correctness_score,
-        runtime_mode          = source.runtime_mode,
-        mlflow_experiment_id  = source.mlflow_experiment_id,
-        mlflow_url            = source.mlflow_url,
-        status                = 'active',
-        updated_at            = current_timestamp()
-    WHEN NOT MATCHED THEN INSERT (
-        agent_id, name, agent_type, owner_principal, description, instructions,
-        tools_enabled, model, serving_endpoint_name, eval_profile,
-        min_safety_score, min_correctness_score,
-        environment, status, runtime_mode, mlflow_experiment_id, mlflow_url,
-        created_at, created_by, updated_at
-    ) VALUES (
-        source.agent_id, source.name, source.agent_type, source.owner_principal,
-        source.description, source.instructions, source.tools_enabled, source.model,
-        source.serving_endpoint_name, source.eval_profile,
-        source.min_safety_score, source.min_correctness_score,
-        '{next_env}', 'active', source.runtime_mode, source.mlflow_experiment_id, source.mlflow_url,
-        current_timestamp(), source.owner_principal, current_timestamp()
+    mlflow_url_val = (
+        f"{staging_host}/ml/experiments/{mlflow_experiment_id}"
+        if mlflow_experiment_id and staging_host
+        else None
     )
-    """)
+    endpoint = _ENV_FRAMEWORK_ENDPOINT.get(next_env, _FRAMEWORK_ENDPOINT)
 
-    # ── 3. Copy tools to destination env ──────────────────────────
-    try:
-        tools_list = json.loads(row.get("tools_enabled_json") or "[]")
-    except Exception:
-        tools_list = []
+    # ── 2. Update agent environment flag in Lakebase ──────────────
+    lakebase.execute(
+        """
+        UPDATE agents_config
+        SET environment          = %s,
+            serving_endpoint_name = %s,
+            mlflow_experiment_id  = COALESCE(%s, mlflow_experiment_id),
+            mlflow_url            = COALESCE(%s, mlflow_url),
+            approval_requested    = FALSE,
+            status                = 'active',
+            updated_at            = NOW()
+        WHERE agent_id = %s
+        """,
+        (next_env, endpoint, mlflow_experiment_id, mlflow_url_val, agent_id),
+    )
 
-    if tools_list:
-        try:
-            _ensure_tools_table(w_dst, wh_dst, prefix_dst)
-        except Exception:
-            pass
-        for tool_name in tools_list:
+    # ── 3. Update tools used by this agent to the target environment ──
+    tools_enabled: list[str] = agent.get("tools_enabled") or []
+    if tools_enabled and src_parts is not None:
+        w_src, catalog_src, schema_src, wh_src = src_parts
+        for tool_name in tools_enabled:
             try:
-                tool_resp = _sql(w_src, wh_src, f"""
-                    SELECT tool_name, kind, ref, description, owner
-                    FROM {prefix_src}.tools_config
-                    WHERE tool_name = '{_esc(tool_name)}'
-                    LIMIT 1
-                """)
-                tool_rows = _rows_to_dicts(tool_resp)
-                if not tool_rows:
+                tool = lakebase.execute_one(
+                    "SELECT tool_name, kind, ref FROM tools_config WHERE tool_name = %s",
+                    (tool_name,),
+                )
+                if tool is None:
                     continue
-                t        = tool_rows[0]
-                t_kind   = t.get("kind") or ""
-                t_src_ref = t.get("ref") or ""
-                t_desc   = _esc(t.get("description") or "")
-                t_owner  = _esc(t.get("owner") or "")
-
-                # For Genie tools: create the Genie space in the destination workspace.
-                # If space creation fails, skip the tool — don't register a broken ref.
-                if t_kind == "mcp_genie":
+                new_ref = tool["ref"]
+                if tool.get("kind") == "mcp_genie":
                     try:
-                        src_catalog = prefix_src.split(".")[0]
-                        t_dst_ref = _promote_genie_space(
-                            src_ref=t_src_ref,
+                        new_ref = _promote_genie_space(
+                            src_ref=tool["ref"],
                             src_w=w_src,
                             target_w=w_dst,
-                            src_catalog=src_catalog,
+                            src_catalog=catalog_src,
                             target_catalog=catalog_dst,
                             target_warehouse=wh_dst,
                             target_host=staging_host,
                         )
                     except HTTPException as exc:
                         print(f"[Promote] Genie space para tool '{tool_name}' falhou: {exc.detail}", file=sys.stderr)
-                        continue  # skip — don't register tool without its Genie space
-                else:
-                    t_dst_ref = t_src_ref
-
-                t_ref = _esc(t_dst_ref)
-                _sql(w_dst, wh_dst, f"""
-                MERGE INTO {prefix_dst}.tools_config AS target
-                USING (
-                  SELECT
-                    '{_esc(tool_name)}'       AS tool_name,
-                    '{_esc(t_kind)}'          AS kind,
-                    '{t_ref}'                 AS ref,
-                    '{t_desc}'                AS description,
-                    '{t_owner}'               AS owner,
-                    '{next_env}'              AS environment
-                ) AS source
-                ON target.tool_name = source.tool_name
-                WHEN MATCHED THEN UPDATE SET
-                    kind        = source.kind,
-                    ref         = source.ref,
-                    description = source.description,
-                    owner       = source.owner,
-                    environment = source.environment,
-                    status      = 'active',
-                    approved_at = current_timestamp()
-                WHEN NOT MATCHED THEN INSERT (
-                    tool_name, kind, ref, description, owner,
-                    environment, status, created_at
-                ) VALUES (
-                    source.tool_name, source.kind, source.ref, source.description, source.owner,
-                    source.environment, 'active', current_timestamp()
+                        continue
+                lakebase.execute(
+                    "UPDATE tools_config SET environment = %s, ref = %s, status = 'active', approved_at = NOW() WHERE tool_name = %s",
+                    (next_env, new_ref, tool_name),
                 )
-                """)
             except Exception:
                 pass  # non-critical
-
-    # ── 4. Clear approval_requested in source env ─────────────────
-    try:
-        _sql(w_src, wh_src, f"""
-            UPDATE {prefix_src}.agents_config
-            SET approval_requested = false, updated_at = current_timestamp()
-            WHERE agent_id = '{_esc(agent_id)}'
-        """)
-    except Exception:
-        pass  # non-critical
 
     return {
         "agent_id": agent_id,
         "promoted_to": next_env,
-        "tools_promoted": tools_list,
+        "tools_promoted": tools_enabled,
         "mlflow_experiment_id": mlflow_experiment_id,
     }
 
@@ -700,71 +380,62 @@ def promote_agent(agent_id: str):
 @router.post("/agents/{agent_id}/request-approval")
 def request_approval(agent_id: str):
     """Mark an agent as pending approval review (dev only)."""
-    found = _find_agent(agent_id)
-    if found is None:
+    agent = _find_agent(agent_id)
+    if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    w, warehouse_id, prefix, env = found
-    if env != "dev":
+    if agent.get("environment") != "dev":
         raise HTTPException(status_code=400, detail="Apenas agentes dev podem solicitar aprovação.")
-    _sql(w, warehouse_id, f"""
-        UPDATE {prefix}.agents_config
-        SET approval_requested = true, updated_at = current_timestamp()
-        WHERE agent_id = '{_esc(agent_id)}'
-    """)
+    lakebase.execute(
+        "UPDATE agents_config SET approval_requested = TRUE, updated_at = NOW() WHERE agent_id = %s",
+        (agent_id,),
+    )
     return {"agent_id": agent_id, "approval_requested": True}
 
 
 @router.post("/agents/{agent_id}/reject-approval")
 def reject_approval(agent_id: str):
     """Reject an approval request, returning agent to draft state."""
-    found = _find_agent(agent_id)
-    if found is None:
+    agent = _find_agent(agent_id)
+    if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    w, warehouse_id, prefix, _ = found
-    _sql(w, warehouse_id, f"""
-        UPDATE {prefix}.agents_config
-        SET approval_requested = false, updated_at = current_timestamp()
-        WHERE agent_id = '{_esc(agent_id)}'
-    """)
+    lakebase.execute(
+        "UPDATE agents_config SET approval_requested = FALSE, updated_at = NOW() WHERE agent_id = %s",
+        (agent_id,),
+    )
     return {"agent_id": agent_id, "approval_requested": False}
 
 
 # ── Run eval ──────────────────────────────────────────────────
 
-def _run_eval_task(agent_id: str, staging_cfg: dict, dev_prefix: str, dev_cfg: dict) -> None:
+def _run_eval_task(agent_id: str, staging_cfg: dict) -> None:
     """Background task: run mlflow.genai.evaluate() against the staging endpoint."""
     import os
     import mlflow
     from mlflow.genai.scorers import Correctness, Safety, Guidelines
 
     w_staging = _workspace_client_for_env(staging_cfg)
-    wh        = staging_cfg["warehouse_id"]
-    prefix    = f"{staging_cfg['catalog']}.{staging_cfg['schema_name']}"
 
     try:
-        # Fetch staging agent details
-        resp = _sql(w_staging, wh,
-            f"SELECT serving_endpoint_name, mlflow_experiment_id FROM {prefix}.agents_config "
-            f"WHERE agent_id = '{_esc(agent_id)}' LIMIT 1")
-        row           = _rows_to_dicts(resp)[0]
-        experiment_id = (row.get("mlflow_experiment_id") or "").strip()
-        endpoint      = (row.get("serving_endpoint_name") or "").strip()
+        agent = lakebase.execute_one(
+            "SELECT serving_endpoint_name, mlflow_experiment_id FROM agents_config WHERE agent_id = %s",
+            (agent_id,),
+        )
+        if not agent:
+            raise ValueError(f"Agente '{agent_id}' não encontrado no Lakebase.")
+
+        experiment_id = (agent.get("mlflow_experiment_id") or "").strip()
+        endpoint      = (agent.get("serving_endpoint_name") or "").strip()
 
         if not experiment_id:
-            raise ValueError("mlflow_experiment_id ausente no staging.")
+            raise ValueError("mlflow_experiment_id ausente.")
 
-        # Fetch eval entries from dev
-        w_dev  = _workspace_client_for_env(dev_cfg)
-        wh_dev = dev_cfg["warehouse_id"]
-        eval_resp = _sql(w_dev, wh_dev,
-            f"SELECT request, expected_response FROM {dev_prefix}.eval_datasets "
-            f"WHERE agent_id = '{_esc(agent_id)}' ORDER BY created_at ASC")
-        entries = _rows_to_dicts(eval_resp)
-
+        entries = lakebase.execute(
+            "SELECT request, expected_response FROM eval_datasets WHERE agent_id = %s ORDER BY created_at",
+            (agent_id,),
+        )
         if not entries:
             raise ValueError("Dataset de avaliação vazio.")
 
-        # Build eval data in mlflow.genai.evaluate() format
         eval_data = [
             {
                 "inputs": {"query": e.get("request") or ""},
@@ -773,7 +444,6 @@ def _run_eval_task(agent_id: str, staging_cfg: dict, dev_prefix: str, dev_cfg: d
             for e in entries
         ]
 
-        # predict_fn closure — calls staging serving endpoint
         def predict_fn(query: str) -> dict:
             if not endpoint:
                 return {"response": "ERRO: endpoint não configurado"}
@@ -794,7 +464,6 @@ def _run_eval_task(agent_id: str, staging_cfg: dict, dev_prefix: str, dev_cfg: d
             except Exception as call_exc:
                 return {"response": f"ERRO: {call_exc}"}
 
-        # Point MLflow to the staging workspace (save/restore env vars)
         staging_host  = (staging_cfg.get("workspace_url") or "").rstrip("/")
         staging_token = staging_cfg.get("token") or ""
         _env_keys = ("DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET")
@@ -829,7 +498,6 @@ def _run_eval_task(agent_id: str, staging_cfg: dict, dev_prefix: str, dev_cfg: d
             )
             run_id = results.run_id
             print(f"[Eval] Concluído: agent={agent_id} run_id={run_id} metrics={results.metrics}", file=sys.stderr)
-
         finally:
             for k, v in _orig.items():
                 if v is not None:
@@ -837,21 +505,18 @@ def _run_eval_task(agent_id: str, staging_cfg: dict, dev_prefix: str, dev_cfg: d
                 else:
                     os.environ.pop(k, None)
 
-        _sql(w_staging, wh, f"""
-            UPDATE {prefix}.agents_config
-            SET eval_status = 'completed', eval_run_id = '{_esc(run_id)}',
-                updated_at = current_timestamp()
-            WHERE agent_id = '{_esc(agent_id)}'
-        """)
+        lakebase.execute(
+            "UPDATE agents_config SET eval_status = 'completed', eval_run_id = %s, updated_at = NOW() WHERE agent_id = %s",
+            (run_id, agent_id),
+        )
 
     except Exception as exc:
         print(f"[Eval] Falha: {exc}", file=sys.stderr)
         try:
-            _sql(w_staging, wh, f"""
-                UPDATE {prefix}.agents_config
-                SET eval_status = 'failed', updated_at = current_timestamp()
-                WHERE agent_id = '{_esc(agent_id)}'
-            """)
+            lakebase.execute(
+                "UPDATE agents_config SET eval_status = 'failed', updated_at = NOW() WHERE agent_id = %s",
+                (agent_id,),
+            )
         except Exception:
             pass
 
@@ -859,36 +524,23 @@ def _run_eval_task(agent_id: str, staging_cfg: dict, dev_prefix: str, dev_cfg: d
 @router.post("/agents/{agent_id}/run-eval")
 def run_eval(agent_id: str, background_tasks: BackgroundTasks):
     """Trigger async evaluation run for a staging agent."""
-    found = _find_agent(agent_id)
-    if found is None:
+    agent = _find_agent(agent_id)
+    if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    _, _, _, env = found
-    if env != "staging":
+    if agent.get("environment") != "staging":
         raise HTTPException(status_code=400, detail="Avaliação só pode ser disparada para agentes no staging.")
 
     staging_parts = _env_client("staging")
-    dev_parts     = _env_client("dev")
     if staging_parts is None:
         raise HTTPException(status_code=503, detail="Staging não configurado.")
-    if dev_parts is None:
-        raise HTTPException(status_code=503, detail="Dev não configurado.")
-
     _, s_catalog, s_schema, s_wh = staging_parts
-    _, d_catalog, d_schema, d_wh = dev_parts
-
     staging_cfg = {**_get_env_config("staging"), "catalog": s_catalog, "schema_name": s_schema, "warehouse_id": s_wh}
-    dev_cfg     = {**_get_env_config("dev"),     "catalog": d_catalog, "schema_name": d_schema, "warehouse_id": d_wh}
-    dev_prefix  = f"{d_catalog}.{d_schema}"
 
-    # Mark as running immediately (persists across refreshes)
-    w_staging = _workspace_client_for_env(staging_cfg)
-    _sql(w_staging, s_wh, f"""
-        UPDATE {s_catalog}.{s_schema}.agents_config
-        SET eval_status = 'running', eval_run_id = NULL, updated_at = current_timestamp()
-        WHERE agent_id = '{_esc(agent_id)}'
-    """)
-
-    background_tasks.add_task(_run_eval_task, agent_id, staging_cfg, dev_prefix, dev_cfg)
+    lakebase.execute(
+        "UPDATE agents_config SET eval_status = 'running', eval_run_id = NULL, updated_at = NOW() WHERE agent_id = %s",
+        (agent_id,),
+    )
+    background_tasks.add_task(_run_eval_task, agent_id, staging_cfg)
     return {"agent_id": agent_id, "eval_status": "running"}
 
 
@@ -905,25 +557,12 @@ class ChatRequest(BaseModel):
 
 @router.post("/agents/{agent_id}/chat")
 def chat_with_agent(agent_id: str, body: ChatRequest):
-    """
-    Send messages to the corp-agent-framework's serving endpoint for the agent's environment.
-
-    The framework deploys a single multi-tenant ConfigDrivenAgent endpoint per environment.
-    The specific agent is selected by passing agent_id in custom_inputs.
-    """
-    found = _find_agent(agent_id)
-    if found is None:
-        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    w, warehouse_id, prefix, _ = found
-
-    resp = _sql(w, warehouse_id,
-        f"SELECT serving_endpoint_name FROM {prefix}.agents_config "
-        f"WHERE agent_id = '{_esc(agent_id)}' LIMIT 1")
-    rows = _rows_to_dicts(resp)
-    if not rows:
+    """Send messages to the corp-agent-framework serving endpoint for this agent."""
+    agent = _find_agent(agent_id)
+    if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
 
-    endpoint = (rows[0].get("serving_endpoint_name") or "").strip()
+    endpoint = (agent.get("serving_endpoint_name") or "").strip()
     if not endpoint:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -934,16 +573,18 @@ def chat_with_agent(agent_id: str, body: ChatRequest):
             ),
         )
 
-    messages = [{"role": m.role, "content": m.content} for m in body.messages]
+    env   = agent.get("environment") or "dev"
+    parts = _env_client(env)
+    if parts is None:
+        raise HTTPException(status_code=503, detail=f"Ambiente '{env}' não configurado.")
+    w, _, _, _ = parts
 
+    messages = [{"role": m.role, "content": m.content} for m in body.messages]
     try:
         result = w.api_client.do(
             "POST",
             f"/serving-endpoints/{endpoint}/invocations",
-            body={
-                "input": messages,
-                "custom_inputs": {"agent_id": agent_id},
-            },
+            body={"input": messages, "custom_inputs": {"agent_id": agent_id}},
         )
     except Exception as exc:
         raise HTTPException(
@@ -951,14 +592,12 @@ def chat_with_agent(agent_id: str, body: ChatRequest):
             detail=f"Erro ao chamar endpoint '{endpoint}': {exc}",
         ) from exc
 
-    # Handle OpenAI-compatible response (most common from Databricks serving)
     choices = result.get("choices") or []
     if choices:
         content = (choices[0].get("message") or {}).get("content") or ""
         if content:
             return {"reply": content}
 
-    # Handle ResponsesAgent output format
     for item in (result.get("output") or []):
         if isinstance(item, dict) and item.get("type") == "message":
             for c in (item.get("content") or []):
@@ -970,30 +609,6 @@ def chat_with_agent(agent_id: str, body: ChatRequest):
 
 # ── Eval dataset ──────────────────────────────────────────────
 
-_EVAL_DATASET_DDL = """
-    CREATE TABLE IF NOT EXISTS {prefix}.eval_datasets (
-        id                 STRING NOT NULL,
-        agent_id           STRING NOT NULL,
-        request            STRING NOT NULL,
-        expected_response  STRING NOT NULL,
-        created_at         TIMESTAMP
-    )
-    USING DELTA
-    COMMENT 'Eval dataset entries for agent testing.'
-"""
-
-
-def _ensure_eval_dataset_table(w: WorkspaceClient, warehouse_id: str, prefix: str) -> None:
-    try:
-        _sql(w, warehouse_id, f"CREATE SCHEMA IF NOT EXISTS {prefix}")
-    except Exception:
-        pass
-    try:
-        _sql(w, warehouse_id, _EVAL_DATASET_DDL.format(prefix=prefix))
-    except Exception:
-        pass
-
-
 class EvalEntryBody(BaseModel):
     request: str
     expected_response: str
@@ -1001,82 +616,47 @@ class EvalEntryBody(BaseModel):
 
 @router.get("/agents/{agent_id}/eval-dataset")
 def list_eval_dataset(agent_id: str):
-    parts = _env_client("dev")
-    if parts is None:
-        raise HTTPException(status_code=503, detail="Dev workspace não configurado.")
-    w, catalog, schema_name, warehouse_id = parts
-    prefix = f"{catalog}.{schema_name}"
-    _ensure_eval_dataset_table(w, warehouse_id, prefix)
-    resp = _sql(w, warehouse_id, f"""
-        SELECT id, agent_id, request, expected_response, created_at
-        FROM {prefix}.eval_datasets
-        WHERE agent_id = '{_esc(agent_id)}'
-        ORDER BY created_at ASC
-    """)
-    return {"entries": _rows_to_dicts(resp)}
+    rows = lakebase.execute(
+        "SELECT id, agent_id, request, expected_response, created_at FROM eval_datasets WHERE agent_id = %s ORDER BY created_at",
+        (agent_id,),
+    )
+    return {"entries": rows}
 
 
 @router.post("/agents/{agent_id}/eval-dataset", status_code=status.HTTP_201_CREATED)
 def add_eval_entry(agent_id: str, body: EvalEntryBody):
-    import uuid as _uuid
-    parts = _env_client("dev")
-    if parts is None:
-        raise HTTPException(status_code=503, detail="Dev workspace não configurado.")
-    w, catalog, schema_name, warehouse_id = parts
-    prefix = f"{catalog}.{schema_name}"
-    _ensure_eval_dataset_table(w, warehouse_id, prefix)
     entry_id = str(_uuid.uuid4())
-    _sql(w, warehouse_id, f"""
-        INSERT INTO {prefix}.eval_datasets (id, agent_id, request, expected_response, created_at)
-        VALUES (
-            '{entry_id}',
-            '{_esc(agent_id)}',
-            '{_esc(body.request)}',
-            '{_esc(body.expected_response)}',
-            current_timestamp()
-        )
-    """)
+    lakebase.execute(
+        "INSERT INTO eval_datasets (id, agent_id, request, expected_response, created_at) VALUES (%s, %s, %s, %s, NOW())",
+        (entry_id, agent_id, body.request, body.expected_response),
+    )
     return {"id": entry_id, "agent_id": agent_id, "request": body.request, "expected_response": body.expected_response}
 
 
 @router.put("/agents/{agent_id}/eval-dataset/{entry_id}")
 def update_eval_entry(agent_id: str, entry_id: str, body: EvalEntryBody):
-    parts = _env_client("dev")
-    if parts is None:
-        raise HTTPException(status_code=503, detail="Dev workspace não configurado.")
-    w, catalog, schema_name, warehouse_id = parts
-    prefix = f"{catalog}.{schema_name}"
-    _sql(w, warehouse_id, f"""
-        UPDATE {prefix}.eval_datasets
-        SET request = '{_esc(body.request)}',
-            expected_response = '{_esc(body.expected_response)}'
-        WHERE id = '{_esc(entry_id)}' AND agent_id = '{_esc(agent_id)}'
-    """)
+    lakebase.execute(
+        "UPDATE eval_datasets SET request = %s, expected_response = %s WHERE id = %s AND agent_id = %s",
+        (body.request, body.expected_response, entry_id, agent_id),
+    )
     return {"id": entry_id, "agent_id": agent_id}
 
 
 @router.delete("/agents/{agent_id}/eval-dataset/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_eval_entry(agent_id: str, entry_id: str):
-    parts = _env_client("dev")
-    if parts is None:
-        raise HTTPException(status_code=503, detail="Dev workspace não configurado.")
-    w, catalog, schema_name, warehouse_id = parts
-    prefix = f"{catalog}.{schema_name}"
-    _sql(w, warehouse_id, f"""
-        DELETE FROM {prefix}.eval_datasets
-        WHERE id = '{_esc(entry_id)}' AND agent_id = '{_esc(agent_id)}'
-    """)
+    lakebase.execute(
+        "DELETE FROM eval_datasets WHERE id = %s AND agent_id = %s",
+        (entry_id, agent_id),
+    )
 
 
 # ── Delete agent ──────────────────────────────────────────────
 
 @router.delete("/agents/{agent_id}")
 def delete_agent(agent_id: str):
-    found = _find_agent(agent_id)
-    if found is None:
+    agent = _find_agent(agent_id)
+    if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    w, warehouse_id, prefix, env = found
-    _sql(w, warehouse_id, f"""
-        DELETE FROM {prefix}.agents_config WHERE agent_id = '{_esc(agent_id)}'
-    """)
-    return {"deleted": agent_id, "environment": env}
+    # eval_datasets cascade-deletes via FK
+    lakebase.execute("DELETE FROM agents_config WHERE agent_id = %s", (agent_id,))
+    return {"deleted": agent_id, "environment": agent.get("environment", "dev")}

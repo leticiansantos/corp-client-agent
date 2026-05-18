@@ -93,3 +93,25 @@ def execute(sql: str, params: tuple = ()) -> list[dict]:
 def execute_one(sql: str, params: tuple = ()) -> dict | None:
     rows = execute(sql, params)
     return rows[0] if rows else None
+
+
+def ensure_schema() -> None:
+    """Idempotent schema migrations — run once at startup."""
+    execute("""
+        ALTER TABLE IF EXISTS tools_config
+            ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'default'
+    """)
+    execute("""
+        ALTER TABLE IF EXISTS agents_config
+            ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'default'
+    """)
+    execute("""
+        CREATE TABLE IF NOT EXISTS domain_model_approvals (
+            domain      TEXT NOT NULL,
+            model_name  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            notes       TEXT,
+            updated_at  TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (domain, model_name)
+        )
+    """)

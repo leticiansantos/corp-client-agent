@@ -512,7 +512,7 @@ print("DEPLOY_DONE")
 
 
 def _generate_deploy_script_lakebase(
-    catalog: str, schema: str, environment: str,
+    catalog: str, schema: str, environment: str, domain: str,
     workspace_url: str = "", token: str = "",
     lakebase_host: str = "", lakebase_database: str = "", lakebase_username: str = "",
 ) -> str:
@@ -521,7 +521,7 @@ def _generate_deploy_script_lakebase(
     The serving endpoint reads agent/tool config from Lakebase (PostgreSQL),
     so no Delta catalog/schema/warehouse_id is needed at inference time.
     """
-    endpoint_name = DOMAIN_ENDPOINT_NAME_TPL.format(domain="{domain}", env=environment)
+    endpoint_name = DOMAIN_ENDPOINT_NAME_TPL.format(domain=domain, env=environment)
     model_name    = f"{catalog}.{schema}.{_CORP_MODEL_SUFFIX}_{environment}"
     whl_path      = f"/Volumes/{catalog}/{schema}/libs/corp_agent_framework-{_CORP_WHL_VERSION}-py3-none-any.whl"
     whl_local     = f"/tmp/corp_agent_framework-{_CORP_WHL_VERSION}-py3-none-any.whl"
@@ -561,11 +561,12 @@ from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedEntity
 CATALOG       = "{catalog}"
 SCHEMA        = "{schema}"
 ENVIRONMENT   = "{environment}"
+DOMAIN        = "{domain}"
 MODEL_NAME    = "{model_name}"
 ENDPOINT_NAME = "{endpoint_name}"
 
 # Lakebase-aware: table_name/warehouse_id are ignored at inference time (kept for compat)
-agent = ConfigDrivenAgent(environment=ENVIRONMENT)
+agent = ConfigDrivenAgent(environment=ENVIRONMENT, domain=DOMAIN)
 
 mlflow.set_registry_uri("databricks-uc")
 
@@ -1229,17 +1230,12 @@ def _deploy_domain_background(domain: str, env: str, env_cfg: dict) -> None:
         # 7. Upload notebook (Lakebase-aware deploy script)
         _step("Carregando notebook de deploy...")
         script = _generate_deploy_script_lakebase(
-            catalog, schema, env,
+            catalog, schema, env, domain,
             workspace_url=env_cfg.get("workspace_url", ""),
             token=env_cfg.get("token", ""),
             lakebase_host=settings.lakebase_host,
             lakebase_database=settings.lakebase_database,
             lakebase_username=settings.lakebase_username,
-        )
-        # Replace placeholder {domain} in endpoint name inside the script
-        script = script.replace(
-            f'ENDPOINT_NAME = "corp-config-driven-agent-{{domain}}-{env}"',
-            f'ENDPOINT_NAME = "{endpoint_name}"',
         )
         notebook_dir  = "/Shared/_corp_client_agent"
         notebook_path = f"{notebook_dir}/deploy_framework_{domain}_{env}"
@@ -1421,6 +1417,91 @@ def deploy_domain_env(domain: str, env: str):
     ).start()
 
     return {"domain": domain, "env": env, "deploying": True}
+
+
+def _ensure_domain_model_approvals_table() -> None:
+    from app.api import lakebase
+    lakebase.execute("""
+        CREATE TABLE IF NOT EXISTS domain_model_approvals (
+            domain      TEXT NOT NULL,
+            model_name  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            notes       TEXT,
+            updated_at  TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (domain, model_name)
+        )
+    """)
+
+
+@router.get("/domains/{domain}/models")
+def list_domain_models(domain: str):
+    """
+    Lists serving endpoint models available for the domain's dev workspace,
+    merged with per-domain approval status from Lakebase.
+    """
+    from app.api import lakebase
+    _ensure_domain_model_approvals_table()
+
+    # Per-domain approval statuses
+    approval_rows = lakebase.execute(
+        "SELECT model_name, status, notes FROM domain_model_approvals WHERE domain = %s",
+        (domain,),
+    )
+    domain_approvals = {r["model_name"]: r for r in approval_rows}
+
+    # Domain dev workspace config
+    cfg_rows = lakebase.execute(
+        "SELECT workspace_url, token FROM domain_envs WHERE domain = %s AND env = 'dev'",
+        (domain,),
+    )
+    if not cfg_rows or not cfg_rows[0].get("workspace_url") or not cfg_rows[0].get("token"):
+        return {"models": []}
+
+    sess = _get_env_session(cfg_rows[0])
+    raw = sess.list_endpoints()
+
+    def _is_system_ai(ep: dict) -> bool:
+        name       = ep.get("name", "")
+        model_name = ep.get("model_name", "")
+        return name.startswith("databricks-") or model_name.startswith("system.ai.")
+
+    models = []
+    for ep in raw:
+        if not ep.get("name") or not _is_system_ai(ep):
+            continue
+        ap = domain_approvals.get(ep["name"], {})
+        models.append({
+            "name":            ep["name"],
+            "env":             "dev",
+            "state":           str(ep.get("state", "")),
+            "model_name":      ep.get("model_name", ""),
+            "creator":         ep.get("creator", ""),
+            "approval_status": ap.get("status") or "pending",
+            "notes":           ap.get("notes") or "",
+        })
+    return {"models": models}
+
+
+@router.patch("/domains/{domain}/models/{model_name:path}/status")
+def update_domain_model_status(domain: str, model_name: str, body: PatchModelStatusRequest):
+    """Set per-domain approval status for a model."""
+    from app.api import lakebase
+    allowed = {"approved", "rejected", "pending"}
+    if body.new_status not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Status inválido. Valores aceitos: {', '.join(sorted(allowed))}",
+        )
+    _ensure_domain_model_approvals_table()
+    lakebase.execute("""
+        INSERT INTO domain_model_approvals (domain, model_name, status, notes, updated_at)
+        VALUES (%s, %s, %s, %s, NOW())
+        ON CONFLICT (domain, model_name) DO UPDATE SET
+            status     = EXCLUDED.status,
+            notes      = EXCLUDED.notes,
+            updated_at = NOW()
+    """, (domain, model_name, body.new_status, body.notes or ""))
+    return {"domain": domain, "model_name": model_name, "status": body.new_status}
 
 
 @router.patch("/models/{model_name:path}/status")

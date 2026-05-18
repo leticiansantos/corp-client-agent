@@ -11,7 +11,9 @@ from databricks.sdk import WorkspaceClient
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
+from app.api import lakebase
 from app.api.settings import (
+    DOMAIN_ENDPOINT_NAME_TPL,
     ENDPOINT_NAME_TPL,
     _get_env_config_from_db,
     _get_env_session,
@@ -31,6 +33,7 @@ class ChatRequest(BaseModel):
     env: str
     agent_id: str
     messages: list[ChatMessage]
+    domain: str | None = None
 
 
 @router.post("/chat")
@@ -47,21 +50,34 @@ def chat(body: ChatRequest):
             detail="agent_id é obrigatório.",
         )
 
-    try:
-        env_cfg = _get_env_config_from_db(body.env)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Erro ao ler configuração do ambiente: {exc}",
-        ) from exc
-
-    if not env_cfg or not env_cfg.get("workspace_url") or not env_cfg.get("token"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Workspace do ambiente '{body.env}' não configurado.",
+    # When a domain is specified, use domain-specific workspace + endpoint
+    if body.domain:
+        rows = lakebase.execute(
+            "SELECT workspace_url, token FROM domain_envs WHERE domain = %s AND env = %s",
+            (body.domain, body.env),
         )
+        if not rows or not rows[0].get("workspace_url") or not rows[0].get("token"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Workspace do domínio '{body.domain}/{body.env}' não configurado.",
+            )
+        env_cfg = rows[0]
+        endpoint_name = DOMAIN_ENDPOINT_NAME_TPL.format(domain=body.domain, env=body.env)
+    else:
+        try:
+            env_cfg = _get_env_config_from_db(body.env)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Erro ao ler configuração do ambiente: {exc}",
+            ) from exc
 
-    endpoint_name = ENDPOINT_NAME_TPL.format(env=body.env)
+        if not env_cfg or not env_cfg.get("workspace_url") or not env_cfg.get("token"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Workspace do ambiente '{body.env}' não configurado.",
+            )
+        endpoint_name = ENDPOINT_NAME_TPL.format(env=body.env)
 
     try:
         sess = _get_env_session(env_cfg)

@@ -918,3 +918,79 @@
 .st-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .st-page-info  { font-size: 0.82rem; color: var(--color-navy); white-space: nowrap; }
 .st-page-total { color: var(--color-text-muted); }
+
+/* ── Per-domain models ──────────────────────────────────── */
+.st-domain-models {
+  border-top: 1px solid var(--color-border);
+  padding: 16px 20px 20px;
+  background: #FAFBFF;
+}
+
+.st-dm-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.st-dm-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+
+.st-dm-state {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  padding: 6px 0;
+}
+
+.st-dm-error {
+  font-size: 0.82rem;
+  color: #B91C1C;
+  padding: 6px 0;
+}
+
+.st-dm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.83rem;
+}
+
+.st-dm-table thead th {
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.st-dm-table tbody td {
+  padding: 7px 10px;
+  border-bottom: 1px solid #F1F3F5;
+  vertical-align: middle;
+}
+
+.st-dm-table tbody tr:last-child td { border-bottom: none; }
+.st-dm-table tbody tr:hover { background: #F5F3FF22; }
+
+.st-dm-name {
+  font-size: 0.82rem;
+  font-family: monospace;
+  color: var(--color-navy);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-dm-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}

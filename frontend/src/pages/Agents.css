@@ -281,6 +281,16 @@
 .ag-env-badge.env-staging { background: #FEF3C7; color: #92400E; }
 .ag-env-badge.env-prod    { background: #DCFCE7; color: #166534; }
 
+.ag-domain-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  background: #EDE9FE;
+  color: #5B21B6;
+}
+
 /* ── Admin section ─────────────────────────────────────────── */
 .ag-admin-section {
   margin-bottom: 32px;
@@ -562,6 +572,26 @@
 
 .ag-field { display: flex; flex-direction: column; gap: 5px; }
 .ag-field-grow { flex: 1; }
+
+/* Domain locked field — same visual as Tools */
+.ag-field-domain-first {
+  background: #F5F3FF;
+  border: 1.5px solid #C4B5FD;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.ag-field-domain-first .ag-label {
+  color: #5B21B6;
+}
+.ag-field-domain-first .ag-input {
+  background: #fff;
+}
+
+.ag-field-hint {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
 
 .ag-label {
   font-size: 0.8rem;

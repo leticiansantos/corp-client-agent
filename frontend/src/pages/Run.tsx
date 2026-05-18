@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import api from "../services/api";
+import { useDomain } from "../contexts/DomainContext";
 import "./Run.css";
 
 // ── Types ──────────────────────────────────────────────────────
@@ -29,6 +30,7 @@ const ENV_LABELS: Record<Env, string> = {
 
 // ── Component ──────────────────────────────────────────────────
 export default function Run() {
+  const { domain } = useDomain();
   const [selectedEnv, setSelectedEnv] = useState<Env>("dev");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [agentsLoading, setAgentsLoading] = useState(false);
@@ -42,13 +44,15 @@ export default function Run() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Fetch agents whenever env changes
+  // Fetch agents whenever env or domain changes
   useEffect(() => {
     setAgentsLoading(true);
     setSelectedAgentId("");
     setAgents([]);
+    const params: Record<string, string> = { env: selectedEnv };
+    if (domain) params.domain = domain;
     api
-      .get("/agents", { params: { env: selectedEnv } })
+      .get("/agents", { params })
       .then((r) => {
         const list: Agent[] = r.data.agents ?? [];
         setAgents(list);
@@ -56,7 +60,13 @@ export default function Run() {
       })
       .catch(() => setAgents([]))
       .finally(() => setAgentsLoading(false));
-  }, [selectedEnv]);
+  }, [selectedEnv, domain]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset conversation when domain changes
+  useEffect(() => {
+    setMessages([]);
+    setError(null);
+  }, [domain]);
 
   // Auto-scroll to latest message
   useEffect(() => {
@@ -95,6 +105,7 @@ export default function Run() {
         env: selectedEnv,
         agent_id: selectedAgentId,
         messages: newMessages,
+        ...(domain ? { domain } : {}),
       });
       const assistantMsg: Message = {
         role: "assistant",

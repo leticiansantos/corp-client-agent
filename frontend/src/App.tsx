@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Layout from "./components/Layout";
+import { DomainProvider } from "./contexts/DomainContext";
 import Home from "./pages/Home";
 import Tools from "./pages/Tools";
 import Agents from "./pages/Agents";
@@ -12,6 +13,7 @@ import Run from "./pages/Run";
 export default function App() {
   return (
     <BrowserRouter>
+      <DomainProvider>
       <Routes>
         {/* <Route path="/login" element={<Login />} /> */}
         {/* <Route path="/callback" element={<Callback />} /> */}
@@ -30,6 +32,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
+      </DomainProvider>
     </BrowserRouter>
   );
 }

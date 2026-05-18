@@ -77,36 +77,36 @@ def _row_to_api(row: dict) -> dict:
 # ── List agents ───────────────────────────────────────────────
 
 @router.get("/agents")
-def list_agents(env: str | None = Query(default=None)):
-    """Return all agents, optionally filtered by environment."""
+def list_agents(
+    env: str | None = Query(default=None),
+    domain: str | None = Query(default=None),
+):
+    """Return agents, optionally filtered by environment and/or domain."""
+    conditions = []
+    params: list = []
     if env and env in ENVS:
-        rows = lakebase.execute(
-            """
-            SELECT agent_id, name, agent_type, owner_principal, description, instructions,
-                   tools_enabled, model, serving_endpoint_name, eval_profile,
-                   min_safety_score, min_correctness_score, environment, status,
-                   runtime_mode, approval_requested, mlflow_experiment_id, mlflow_url,
-                   eval_run_id, eval_status, created_at, updated_at
-            FROM agents_config
-            WHERE environment = %s
-            ORDER BY created_at DESC
-            """,
-            (env,),
-        )
-    else:
-        rows = lakebase.execute(
-            """
-            SELECT agent_id, name, agent_type, owner_principal, description, instructions,
-                   tools_enabled, model, serving_endpoint_name, eval_profile,
-                   min_safety_score, min_correctness_score, environment, status,
-                   runtime_mode, approval_requested, mlflow_experiment_id, mlflow_url,
-                   eval_run_id, eval_status, created_at, updated_at
-            FROM agents_config
-            ORDER BY
-                CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
-                created_at DESC
-            """
-        )
+        conditions.append("environment = %s")
+        params.append(env)
+    if domain:
+        conditions.append("domain = %s")
+        params.append(domain)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = lakebase.execute(
+        f"""
+        SELECT agent_id, name, agent_type, owner_principal, description, instructions,
+               tools_enabled, model, serving_endpoint_name, eval_profile,
+               min_safety_score, min_correctness_score, environment, status,
+               runtime_mode, approval_requested, mlflow_experiment_id, mlflow_url,
+               eval_run_id, eval_status, created_at, updated_at, domain
+        FROM agents_config
+        {where}
+        ORDER BY
+            CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
+            created_at DESC
+        """,
+        tuple(params),
+    )
     return {"agents": [_row_to_api(r) for r in rows]}
 
 
@@ -115,6 +115,7 @@ def list_agents(env: str | None = Query(default=None)):
 class RegisterAgentRequest(BaseModel):
     agent_id: str
     agent_name: str
+    domain: str = "default"
     agent_type: str = "conversational"
     owner_principal: str = ""
     description: str = ""
@@ -133,18 +134,19 @@ def register_agent(body: RegisterAgentRequest):
     lakebase.execute(
         """
         INSERT INTO agents_config (
-            agent_id, name, agent_type, owner_principal, description, instructions,
+            agent_id, name, domain, agent_type, owner_principal, description, instructions,
             tools_enabled, model, serving_endpoint_name, eval_profile,
             min_safety_score, min_correctness_score,
             environment, status, runtime_mode, created_at, created_by, updated_at
         ) VALUES (
-            %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s,
             %s, %s,
             'dev', 'active', %s, NOW(), %s, NOW()
         )
         ON CONFLICT (agent_id) DO UPDATE SET
             name                  = EXCLUDED.name,
+            domain                = EXCLUDED.domain,
             agent_type            = EXCLUDED.agent_type,
             owner_principal       = EXCLUDED.owner_principal,
             description           = EXCLUDED.description,
@@ -160,14 +162,14 @@ def register_agent(body: RegisterAgentRequest):
             updated_at            = NOW()
         """,
         (
-            body.agent_id, body.agent_name, body.agent_type, body.owner_principal,
+            body.agent_id, body.agent_name, body.domain, body.agent_type, body.owner_principal,
             body.description, body.instructions,
             body.tools_enabled, body.model, _FRAMEWORK_ENDPOINT, body.eval_profile,
             body.min_safety_score, body.min_correctness_score,
             body.runtime_mode, body.owner_principal,
         ),
     )
-    return {"agent_id": body.agent_id, "status": "draft", "environment": "dev"}
+    return {"agent_id": body.agent_id, "status": "draft", "environment": "dev", "domain": body.domain}
 
 
 # ── Update agent ──────────────────────────────────────────────

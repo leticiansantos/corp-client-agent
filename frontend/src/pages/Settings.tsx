@@ -109,16 +109,15 @@ export default function Settings() {
   const [epDeploying, setEpDeploying] = useState<Record<string, boolean>>({});
   const epPollingRef                  = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Models approval
-  const [models, setModels]               = useState<ModelEntry[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(true);
-  const [modelsError, setModelsError]     = useState("");
-  const [approving, setApproving]         = useState<Record<string, boolean>>({});
-  const [approveMsg, setApproveMsg]       = useState<Record<string, string>>({});
-  const [selected, setSelected]           = useState<Set<string>>(new Set());
-  const [bulkApproving, setBulkApproving] = useState(false);
-  const [modelsPage, setModelsPage]       = useState(1);
-  const PAGE_SIZE = 10;
+  // Per-domain models
+  const DM_PAGE_SIZE = 8;
+  const [domainModels, setDomainModels]               = useState<Record<string, ModelEntry[]>>({});
+  const [domainModelsLoading, setDomainModelsLoading] = useState<Record<string, boolean>>({});
+  const [domainModelsError, setDomainModelsError]     = useState<Record<string, string>>({});
+  const [domainApproving, setDomainApproving]         = useState<Record<string, boolean>>({});
+  const [domainPage, setDomainPage]                   = useState<Record<string, number>>({});
+  const [domainSelected, setDomainSelected]           = useState<Record<string, Set<string>>>({});
+  const [domainBulkApproving, setDomainBulkApproving] = useState<Record<string, boolean>>({});
 
   // ── Domains load ─────────────────────────────────────────────
   useEffect(() => {
@@ -203,11 +202,96 @@ export default function Settings() {
     for (const env of ENVS) await handleEnvDeploy(domain, env);
   }
 
+  // ── Per-domain models ─────────────────────────────────────────
+  function loadDomainModels(domain: string) {
+    setDomainModelsLoading((p) => ({ ...p, [domain]: true }));
+    setDomainModelsError((p) => ({ ...p, [domain]: "" }));
+    api
+      .get<{ models: ModelEntry[] }>(`/settings/domains/${encodeURIComponent(domain)}/models`)
+      .then((r) => setDomainModels((p) => ({ ...p, [domain]: r.data.models })))
+      .catch((err) => {
+        const detail = err?.response?.data?.detail ?? err?.message ?? "Erro desconhecido";
+        setDomainModelsError((p) => ({ ...p, [domain]: detail }));
+      })
+      .finally(() => setDomainModelsLoading((p) => ({ ...p, [domain]: false })));
+  }
+
+  async function handleDomainModelStatus(
+    domain: string,
+    modelName: string,
+    newStatus: ModelApprovalStatus,
+  ) {
+    const key = `${domain}::${modelName}`;
+    setDomainApproving((p) => ({ ...p, [key]: true }));
+    try {
+      await api.patch(
+        `/settings/domains/${encodeURIComponent(domain)}/models/${encodeURIComponent(modelName)}/status`,
+        { new_status: newStatus },
+      );
+      setDomainModels((prev) => ({
+        ...prev,
+        [domain]: (prev[domain] ?? []).map((m) =>
+          m.name === modelName ? { ...m, approval_status: newStatus } : m,
+        ),
+      }));
+    } catch (err: unknown) {
+      console.error("Erro ao atualizar status do modelo:", err);
+    } finally {
+      setDomainApproving((p) => ({ ...p, [key]: false }));
+    }
+  }
+
+  function dmToggleSelect(domain: string, name: string) {
+    setDomainSelected((prev) => {
+      const cur = new Set(prev[domain] ?? []);
+      cur.has(name) ? cur.delete(name) : cur.add(name);
+      return { ...prev, [domain]: cur };
+    });
+  }
+
+  function dmToggleSelectAll(domain: string) {
+    const all = domainModels[domain] ?? [];
+    const cur = domainSelected[domain] ?? new Set();
+    setDomainSelected((prev) => ({
+      ...prev,
+      [domain]: cur.size === all.length ? new Set() : new Set(all.map((m) => m.name)),
+    }));
+  }
+
+  async function dmBulkStatus(domain: string, newStatus: ModelApprovalStatus) {
+    const sel = domainSelected[domain] ?? new Set();
+    if (!sel.size) return;
+    setDomainBulkApproving((p) => ({ ...p, [domain]: true }));
+    await Promise.allSettled(
+      Array.from(sel).map((name) =>
+        api.patch(
+          `/settings/domains/${encodeURIComponent(domain)}/models/${encodeURIComponent(name)}/status`,
+          { new_status: newStatus },
+        ).then(() =>
+          setDomainModels((prev) => ({
+            ...prev,
+            [domain]: (prev[domain] ?? []).map((m) =>
+              m.name === name ? { ...m, approval_status: newStatus } : m,
+            ),
+          }))
+        )
+      )
+    );
+    setDomainSelected((prev) => ({ ...prev, [domain]: new Set() }));
+    setDomainBulkApproving((p) => ({ ...p, [domain]: false }));
+  }
+
   // ── Domain CRUD ──────────────────────────────────────────────
   function toggleExpand(domain: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
-      next.has(domain) ? next.delete(domain) : next.add(domain);
+      if (next.has(domain)) {
+        next.delete(domain);
+      } else {
+        next.add(domain);
+        // Lazy-load models the first time the domain is expanded
+        if (!domainModels[domain]) loadDomainModels(domain);
+      }
       return next;
     });
   }
@@ -269,56 +353,6 @@ export default function Settings() {
     } finally {
       setSaving((p) => ({ ...p, [key]: false }));
     }
-  }
-
-  // ── Model approvals ──────────────────────────────────────────
-  function loadModels() {
-    setModelsLoading(true);
-    setModelsError("");
-    api
-      .get<{ models: ModelEntry[] }>("/settings/models")
-      .then((r) => { setModels(r.data.models); setModelsPage(1); })
-      .catch((err) => {
-        const detail = err?.response?.data?.detail ?? err?.message ?? "Erro desconhecido";
-        setModelsError(`Erro ao carregar modelos: ${detail}`);
-      })
-      .finally(() => setModelsLoading(false));
-  }
-
-  useEffect(loadModels, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function handleModelStatus(modelName: string, newStatus: ModelApprovalStatus) {
-    setApproving((p) => ({ ...p, [modelName]: true }));
-    setApproveMsg((m) => ({ ...m, [modelName]: "" }));
-    try {
-      await api.patch(`/settings/models/${encodeURIComponent(modelName)}/status`, { new_status: newStatus });
-      setModels((prev) => prev.map((m) => m.name === modelName ? { ...m, approval_status: newStatus } : m));
-    } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Erro ao atualizar status.";
-      setApproveMsg((m) => ({ ...m, [modelName]: msg }));
-    } finally {
-      setApproving((p) => ({ ...p, [modelName]: false }));
-    }
-  }
-
-  function toggleSelect(name: string) {
-    setSelected((prev) => { const next = new Set(prev); next.has(name) ? next.delete(name) : next.add(name); return next; });
-  }
-
-  function toggleSelectAll() {
-    setSelected(selected.size === models.length ? new Set() : new Set(models.map((m) => m.name)));
-  }
-
-  async function handleBulkStatus(newStatus: ModelApprovalStatus) {
-    setBulkApproving(true);
-    await Promise.allSettled(
-      Array.from(selected).map((name) =>
-        api.patch(`/settings/models/${encodeURIComponent(name)}/status`, { new_status: newStatus })
-          .then(() => setModels((prev) => prev.map((m) => m.name === name ? { ...m, approval_status: newStatus } : m)))
-      )
-    );
-    setSelected(new Set());
-    setBulkApproving(false);
   }
 
   // ── Render ───────────────────────────────────────────────────
@@ -437,6 +471,7 @@ export default function Settings() {
 
                   {/* Expanded: 3 env cards side by side */}
                   {isExpanded && (
+                    <>
                     <div className="st-domain-envs">
                       {ENVS.map((env) => {
                         const key = epKey(d.domain, env);
@@ -604,6 +639,130 @@ export default function Settings() {
                         );
                       })}
                     </div>
+
+                    {/* Per-domain models */}
+                    {(() => {
+                      const allModels  = domainModels[d.domain] ?? [];
+                      const page       = domainPage[d.domain] ?? 1;
+                      const totalPages = Math.ceil(allModels.length / DM_PAGE_SIZE);
+                      const pageModels = allModels.slice((page - 1) * DM_PAGE_SIZE, page * DM_PAGE_SIZE);
+                      const sel        = domainSelected[d.domain] ?? new Set<string>();
+                      const bulkBusy   = !!domainBulkApproving[d.domain];
+                      return (
+                        <div className="st-domain-models">
+                          <div className="st-dm-header">
+                            <span className="st-dm-title">Modelos do domínio</span>
+                            <button
+                              className="st-refresh-btn"
+                              type="button"
+                              disabled={!!domainModelsLoading[d.domain]}
+                              onClick={() => loadDomainModels(d.domain)}
+                            >
+                              {domainModelsLoading[d.domain] ? "Atualizando..." : "Atualizar"}
+                            </button>
+                          </div>
+
+                          {domainModelsLoading[d.domain] && (
+                            <div className="st-dm-state">Carregando modelos...</div>
+                          )}
+                          {domainModelsError[d.domain] && (
+                            <div className="st-dm-error">{domainModelsError[d.domain]}</div>
+                          )}
+                          {!domainModelsLoading[d.domain] && !domainModelsError[d.domain] && allModels.length === 0 && (
+                            <div className="st-dm-state">Nenhum modelo encontrado para este domínio.</div>
+                          )}
+
+                          {!domainModelsLoading[d.domain] && allModels.length > 0 && (
+                            <>
+                              {sel.size > 0 && (
+                                <div className="st-bulk-bar">
+                                  <span className="st-bulk-count">{sel.size} selecionado{sel.size !== 1 ? "s" : ""}</span>
+                                  <button className="st-action-btn st-action-approve" disabled={bulkBusy} onClick={() => dmBulkStatus(d.domain, "approved")}>
+                                    {bulkBusy ? "..." : "Aprovar"}
+                                  </button>
+                                  <button className="st-action-btn st-action-reject" disabled={bulkBusy} onClick={() => dmBulkStatus(d.domain, "rejected")}>
+                                    {bulkBusy ? "..." : "Bloquear"}
+                                  </button>
+                                  <button className="st-bulk-clear" onClick={() => setDomainSelected((p) => ({ ...p, [d.domain]: new Set() }))}>Limpar</button>
+                                </div>
+                              )}
+
+                              <table className="st-dm-table">
+                                <thead>
+                                  <tr>
+                                    <th className="st-col-check">
+                                      <input
+                                        type="checkbox"
+                                        checked={sel.size === allModels.length && allModels.length > 0}
+                                        onChange={() => dmToggleSelectAll(d.domain)}
+                                      />
+                                    </th>
+                                    <th>Endpoint</th>
+                                    <th>Estado</th>
+                                    <th>Aprovação</th>
+                                    <th>Ações</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {pageModels.map((m) => {
+                                    const dmKey = `${d.domain}::${m.name}`;
+                                    return (
+                                      <tr key={m.name} className={sel.has(m.name) ? "st-row-selected" : ""}>
+                                        <td className="st-col-check">
+                                          <input type="checkbox" checked={sel.has(m.name)} onChange={() => dmToggleSelect(d.domain, m.name)} />
+                                        </td>
+                                        <td className="st-dm-name">{m.name}</td>
+                                        <td>
+                                          <span className={`st-ep-state st-ep-${m.state === "READY" ? "ready" : "notready"}`}>
+                                            {m.state}
+                                          </span>
+                                        </td>
+                                        <td>
+                                          <span className={`st-approval-badge st-approval-${m.approval_status}`}>
+                                            {m.approval_status === "approved" ? "Aprovado"
+                                              : m.approval_status === "rejected" ? "Bloqueado"
+                                              : "Pendente"}
+                                          </span>
+                                        </td>
+                                        <td className="st-dm-actions">
+                                          {m.approval_status !== "approved" && (
+                                            <button className="st-action-btn st-action-approve" disabled={!!domainApproving[dmKey]} onClick={() => handleDomainModelStatus(d.domain, m.name, "approved")}>
+                                              {domainApproving[dmKey] ? "..." : "Aprovar"}
+                                            </button>
+                                          )}
+                                          {m.approval_status !== "rejected" && (
+                                            <button className="st-action-btn st-action-reject" disabled={!!domainApproving[dmKey]} onClick={() => handleDomainModelStatus(d.domain, m.name, "rejected")}>
+                                              {domainApproving[dmKey] ? "..." : "Bloquear"}
+                                            </button>
+                                          )}
+                                          {m.approval_status !== "pending" && (
+                                            <button className="st-action-btn st-action-pending" disabled={!!domainApproving[dmKey]} onClick={() => handleDomainModelStatus(d.domain, m.name, "pending")}>
+                                              {domainApproving[dmKey] ? "..." : "Resetar"}
+                                            </button>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+
+                              {totalPages > 1 && (
+                                <div className="st-pagination">
+                                  <button className="st-page-btn" disabled={page === 1} onClick={() => setDomainPage((p) => ({ ...p, [d.domain]: page - 1 }))}>‹ Anterior</button>
+                                  <span className="st-page-info">
+                                    Página {page} de {totalPages}
+                                    <span className="st-page-total"> · {allModels.length} modelos</span>
+                                  </span>
+                                  <button className="st-page-btn" disabled={page === totalPages} onClick={() => setDomainPage((p) => ({ ...p, [d.domain]: page + 1 }))}>Próxima ›</button>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    </>
                   )}
                 </div>
               );
@@ -611,123 +770,6 @@ export default function Settings() {
           </div>
         </div>
 
-        {/* ── Modelos Disponíveis ───────────────────────── */}
-        <div className="st-section">
-          <div className="st-models-header">
-            <div>
-              <h2 className="st-section-title">Modelos Disponíveis</h2>
-              <p className="st-section-desc">
-                Apenas modelos <strong>aprovados</strong> aparecem no formulário de criação de agentes.
-                Os endpoints são lidos em tempo real dos workspaces configurados.
-              </p>
-            </div>
-            <button className="st-refresh-btn" onClick={loadModels} disabled={modelsLoading} type="button">
-              {modelsLoading ? "Atualizando..." : "Atualizar"}
-            </button>
-          </div>
-
-          {modelsLoading && <div className="st-state">Carregando modelos...</div>}
-          {!modelsLoading && modelsError && <div className="st-error-banner">{modelsError}</div>}
-          {!modelsLoading && !modelsError && models.length === 0 && (
-            <div className="st-state">Nenhum endpoint de model serving encontrado nos workspaces configurados.</div>
-          )}
-          {!modelsLoading && !modelsError && models.length > 0 && (() => {
-            const totalPages = Math.ceil(models.length / PAGE_SIZE);
-            const pageModels = models.slice((modelsPage - 1) * PAGE_SIZE, modelsPage * PAGE_SIZE);
-            return (
-              <>
-                {selected.size > 0 && (
-                  <div className="st-bulk-bar">
-                    <span className="st-bulk-count">{selected.size} selecionado{selected.size !== 1 ? "s" : ""}</span>
-                    <button className="st-action-btn st-action-approve" disabled={bulkApproving} onClick={() => handleBulkStatus("approved")}>
-                      {bulkApproving ? "..." : "Aprovar selecionados"}
-                    </button>
-                    <button className="st-action-btn st-action-reject" disabled={bulkApproving} onClick={() => handleBulkStatus("rejected")}>
-                      {bulkApproving ? "..." : "Bloquear selecionados"}
-                    </button>
-                    <button className="st-bulk-clear" onClick={() => setSelected(new Set())}>Limpar seleção</button>
-                  </div>
-                )}
-                <div className="st-models-table-wrap">
-                  <table className="st-models-table">
-                    <thead>
-                      <tr>
-                        <th className="st-col-check">
-                          <input type="checkbox" checked={selected.size === models.length && models.length > 0} onChange={toggleSelectAll} />
-                        </th>
-                        <th>Endpoint</th>
-                        <th>Ambiente</th>
-                        <th>Modelo base</th>
-                        <th>Estado</th>
-                        <th>Aprovação</th>
-                        <th>Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pageModels.map((m) => (
-                        <tr key={m.name} className={selected.has(m.name) ? "st-row-selected" : ""}>
-                          <td className="st-col-check">
-                            <input type="checkbox" checked={selected.has(m.name)} onChange={() => toggleSelect(m.name)} />
-                          </td>
-                          <td className="st-model-name">{m.name}</td>
-                          <td>
-                            <span className={`st-env-badge st-env-badge-${m.env}`}>{m.env}</span>
-                          </td>
-                          <td className="st-model-base">{m.model_name || "—"}</td>
-                          <td>
-                            <span className={`st-ep-state st-ep-${m.state === "READY" ? "ready" : "notready"}`}>
-                              {m.state}
-                            </span>
-                          </td>
-                          <td>
-                            <span className={`st-approval-badge st-approval-${m.approval_status}`}>
-                              {m.approval_status === "approved" ? "Aprovado"
-                                : m.approval_status === "rejected" ? "Bloqueado"
-                                : "Pendente"}
-                            </span>
-                          </td>
-                          <td className="st-model-actions">
-                            {approveMsg[m.name] ? (
-                              <span className="st-approve-err">{approveMsg[m.name]}</span>
-                            ) : (
-                              <>
-                                {m.approval_status !== "approved" && (
-                                  <button className="st-action-btn st-action-approve" disabled={!!approving[m.name]} onClick={() => handleModelStatus(m.name, "approved")}>
-                                    {approving[m.name] ? "..." : "Aprovar"}
-                                  </button>
-                                )}
-                                {m.approval_status !== "rejected" && (
-                                  <button className="st-action-btn st-action-reject" disabled={!!approving[m.name]} onClick={() => handleModelStatus(m.name, "rejected")}>
-                                    {approving[m.name] ? "..." : "Bloquear"}
-                                  </button>
-                                )}
-                                {m.approval_status !== "pending" && (
-                                  <button className="st-action-btn st-action-pending" disabled={!!approving[m.name]} onClick={() => handleModelStatus(m.name, "pending")}>
-                                    {approving[m.name] ? "..." : "Resetar"}
-                                  </button>
-                                )}
-                              </>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {totalPages > 1 && (
-                  <div className="st-pagination">
-                    <button className="st-page-btn" disabled={modelsPage === 1} onClick={() => setModelsPage((p) => p - 1)}>‹ Anterior</button>
-                    <span className="st-page-info">
-                      Página {modelsPage} de {totalPages}
-                      <span className="st-page-total"> · {models.length} modelos</span>
-                    </span>
-                    <button className="st-page-btn" disabled={modelsPage === totalPages} onClick={() => setModelsPage((p) => p + 1)}>Próxima ›</button>
-                  </div>
-                )}
-              </>
-            );
-          })()}
-        </div>
       </div>
     </div>
   );

@@ -9,7 +9,7 @@ Workspace API calls (Genie, Vector Search, UC functions) still go to each env wo
 import time
 
 from databricks.sdk import WorkspaceClient
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 
 from app.api import lakebase
@@ -88,6 +88,40 @@ def _env_client(env: str) -> tuple[WorkspaceClient, str, str, str] | None:
     return w, catalog, schema_name, warehouse_id
 
 
+def _get_domain_config(domain: str, env: str = "dev") -> dict | None:
+    """Read workspace config for a domain+env from domain_envs (Lakebase)."""
+    rows = lakebase.execute(
+        "SELECT workspace_url, token FROM domain_envs WHERE domain = %s AND env = %s",
+        (domain, env),
+    )
+    return rows[0] if rows else None
+
+
+def _domain_client(domain: str, env: str = "dev") -> tuple[WorkspaceClient, str] | None:
+    """
+    Returns (WorkspaceClient, host) for a domain's workspace config.
+    Falls back to the env workspace config when domain has no workspace configured.
+    Returns None when neither has a host.
+    """
+    cfg = _get_domain_config(domain, env)
+    host  = (cfg.get("workspace_url") or "").rstrip("/") if cfg else ""
+    token = (cfg.get("token") or "") if cfg else ""
+
+    # Fall back to env-level config when domain doesn't override it
+    if not host:
+        env_cfg = _get_env_config(env)
+        host  = (env_cfg.get("workspace_url") or "").rstrip("/")
+        token = token or env_cfg.get("token") or ""
+        if not host and env == "dev":
+            host = settings.databricks_host.rstrip("/")
+
+    if not host:
+        return None
+
+    w = _workspace_client_for_env({"workspace_url": host, "token": token})
+    return w, host
+
+
 def _sql(w: WorkspaceClient, warehouse_id: str, statement: str):
     """Execute SQL on any workspace, polling until SUCCEEDED/FAILED."""
     try:
@@ -134,16 +168,27 @@ def _sql(w: WorkspaceClient, warehouse_id: str, statement: str):
 
 
 @router.get("/tools")
-def list_tools():
-    """List all tools from Lakebase, ordered by environment (prod first) then name."""
-    rows = lakebase.execute("""
-        SELECT tool_name, kind, ref, description, owner, status, environment,
-               created_at, created_by, approved_by, approved_at
-        FROM tools_config
-        ORDER BY
-            CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
-            tool_name
-    """)
+def list_tools(domain: str | None = None):
+    """List tools from Lakebase, optionally filtered by domain."""
+    if domain:
+        rows = lakebase.execute("""
+            SELECT tool_name, kind, ref, description, owner, status, environment, domain,
+                   created_at, created_by, approved_by, approved_at
+            FROM tools_config
+            WHERE domain = %s
+            ORDER BY
+                CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
+                tool_name
+        """, (domain,))
+    else:
+        rows = lakebase.execute("""
+            SELECT tool_name, kind, ref, description, owner, status, environment, domain,
+                   created_at, created_by, approved_by, approved_at
+            FROM tools_config
+            ORDER BY
+                CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
+                tool_name
+        """)
     return {"tools": rows}
 
 
@@ -155,6 +200,7 @@ class RegisterToolRequest(BaseModel):
     description: str
     owner: str = "platform-team@empresa.com"
     environment: str = "dev"
+    domain: str = "default"
 
 
 @router.post("/tools", status_code=status.HTTP_201_CREATED)
@@ -162,35 +208,46 @@ def register_tool(body: RegisterToolRequest):
     """Register a new tool into Lakebase with environment='dev'."""
     lakebase.execute("""
         INSERT INTO tools_config
-            (tool_name, kind, ref, description, owner, environment, status, created_at, created_by)
-        VALUES (%s, %s, %s, %s, %s, 'dev', 'active', NOW(), %s)
+            (tool_name, kind, ref, description, owner, environment, domain, status, created_at, created_by)
+        VALUES (%s, %s, %s, %s, %s, 'dev', %s, 'active', NOW(), %s)
         ON CONFLICT (tool_name) DO UPDATE SET
             kind        = EXCLUDED.kind,
             ref         = EXCLUDED.ref,
             description = EXCLUDED.description,
-            owner       = EXCLUDED.owner
-    """, (body.tool_name, body.kind, body.ref, body.description, body.owner, body.owner))
-    return {"tool_name": body.tool_name, "status": "active"}
+            owner       = EXCLUDED.owner,
+            domain      = EXCLUDED.domain
+    """, (body.tool_name, body.kind, body.ref, body.description, body.owner, body.domain, body.owner))
+    return {"tool_name": body.tool_name, "status": "active", "domain": body.domain}
 
 
-# ── Workspace host (dev environment) ─────────────────────────
+# ── Workspace host ─────────────────────────────────────────────
 @router.get("/workspace-host")
-def get_workspace_host():
+def get_workspace_host(domain: str | None = Query(default=None)):
+    if domain:
+        result = _domain_client(domain)
+        if result:
+            return {"host": result[1]}
     cfg  = _get_env_config("dev")
     host = (cfg.get("workspace_url") or settings.databricks_host).rstrip("/")
     return {"host": host}
 
 
-# ── List Genie rooms (dev workspace) ─────────────────────────
+# ── List Genie rooms ───────────────────────────────────────────
 @router.get("/genie-rooms")
-def list_genie_rooms():
-    """Returns all Genie spaces from the dev workspace configured in Settings."""
-    parts = _env_client("dev")
-    if parts is None:
-        raise HTTPException(status_code=503, detail="Ambiente dev não configurado.")
-    w, _, _, _ = parts
-    cfg  = _get_env_config("dev")
-    host = (cfg.get("workspace_url") or settings.databricks_host).rstrip("/")
+def list_genie_rooms(domain: str | None = Query(default=None)):
+    """Returns all Genie spaces from the workspace configured for the given domain (dev env)."""
+    if domain:
+        result = _domain_client(domain)
+        if result is None:
+            raise HTTPException(status_code=503, detail=f"Workspace não configurado para o domínio '{domain}'.")
+        w, host = result
+    else:
+        parts = _env_client("dev")
+        if parts is None:
+            raise HTTPException(status_code=503, detail="Ambiente dev não configurado.")
+        w, _, _, _ = parts
+        cfg  = _get_env_config("dev")
+        host = (cfg.get("workspace_url") or settings.databricks_host).rstrip("/")
 
     for path in ["/api/2.0/genie/spaces", "/api/2.0/genie/rooms"]:
         try:
@@ -226,16 +283,23 @@ def list_genie_rooms():
     )
 
 
-# ── List Vector Search indexes (dev workspace) ────────────────
+# ── List Vector Search indexes ─────────────────────────────────
 @router.get("/vector-search-indexes")
-def list_vector_search_indexes():
-    """Lists all Vector Search indexes in the dev workspace/catalog."""
-    parts = _env_client("dev")
-    if parts is None:
-        raise HTTPException(status_code=503, detail="Ambiente dev não configurado.")
-    w, catalog, _, _ = parts
-    cfg  = _get_env_config("dev")
-    host = (cfg.get("workspace_url") or settings.databricks_host).rstrip("/")
+def list_vector_search_indexes(domain: str | None = Query(default=None)):
+    """Lists all Vector Search indexes in the workspace configured for the given domain."""
+    if domain:
+        result = _domain_client(domain)
+        if result is None:
+            raise HTTPException(status_code=503, detail=f"Workspace não configurado para o domínio '{domain}'.")
+        w, host = result
+        catalog = settings.framework_catalog  # fallback; domain could override in the future
+    else:
+        parts = _env_client("dev")
+        if parts is None:
+            raise HTTPException(status_code=503, detail="Ambiente dev não configurado.")
+        w, catalog, _, _ = parts
+        cfg  = _get_env_config("dev")
+        host = (cfg.get("workspace_url") or settings.databricks_host).rstrip("/")
 
     try:
         ep_data = w.api_client.do("GET", "/api/2.0/vector-search/endpoints")
@@ -273,25 +337,44 @@ def list_vector_search_indexes():
 
 # ── List registered agents ────────────────────────────────────
 @router.get("/agents-list")
-def list_agents_for_tool():
-    """Lists agents from agents_config in Lakebase (dev environment)."""
-    rows = lakebase.execute("""
-        SELECT agent_id, name AS agent_name, agent_type, status
-        FROM agents_config
-        WHERE environment = 'dev'
-        ORDER BY name
-    """)
+def list_agents_for_tool(domain: str | None = Query(default=None)):
+    """Lists agents from agents_config in Lakebase filtered by domain (dev environment)."""
+    if domain:
+        rows = lakebase.execute(
+            "SELECT agent_id, name AS agent_name, agent_type, status FROM agents_config "
+            "WHERE environment = 'dev' AND domain = %s ORDER BY name",
+            (domain,),
+        )
+    else:
+        rows = lakebase.execute("""
+            SELECT agent_id, name AS agent_name, agent_type, status
+            FROM agents_config
+            WHERE environment = 'dev'
+            ORDER BY name
+        """)
     return {"agents": rows}
 
 
-# ── List UC functions (dev workspace) ─────────────────────────
+# ── List UC functions ──────────────────────────────────────────
 @router.get("/uc-functions")
-def list_uc_functions():
-    """Lists all user-defined functions in the dev catalog."""
-    parts = _env_client("dev")
-    if parts is None:
-        raise HTTPException(status_code=503, detail="Ambiente dev não configurado.")
-    w, catalog, _, warehouse_id = parts
+def list_uc_functions(domain: str | None = Query(default=None)):
+    """Lists all user-defined functions in the workspace configured for the given domain."""
+    if domain:
+        result = _domain_client(domain)
+        if result is None:
+            raise HTTPException(status_code=503, detail=f"Workspace não configurado para o domínio '{domain}'.")
+        w_domain, _ = result
+        # For UC functions we still need a warehouse — fall back to dev env
+        parts = _env_client("dev")
+        if parts is None:
+            raise HTTPException(status_code=503, detail="Ambiente dev não configurado para SQL.")
+        _, catalog, _, warehouse_id = parts
+        w = w_domain  # use domain workspace for the query
+    else:
+        parts = _env_client("dev")
+        if parts is None:
+            raise HTTPException(status_code=503, detail="Ambiente dev não configurado.")
+        w, catalog, _, warehouse_id = parts
     resp = _sql(w, warehouse_id, f"SHOW USER FUNCTIONS IN CATALOG {catalog}")
     rows = _rows_to_dicts(resp)
     functions = [next(iter(row.values()), "") for row in rows if row]

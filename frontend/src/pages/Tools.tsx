@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import api from "../services/api";
+import { useDomain } from "../contexts/DomainContext";
 import "./Tools.css";
 
 // ── Types ──────────────────────────────────────────────────────
@@ -15,6 +16,7 @@ interface Tool {
   status: ToolStatus;
   created_at: string;
   environment: string;
+  domain: string;
 }
 
 interface NewToolForm {
@@ -24,6 +26,7 @@ interface NewToolForm {
   description: string;
   owner: string;
   environment: string;
+  domain: string;
 }
 
 interface GenieRoom {
@@ -67,10 +70,13 @@ const EMPTY_FORM: NewToolForm = {
   description: "",
   owner:       "",
   environment: "dev",
+  domain:      "",
 };
 
 // ── Component ──────────────────────────────────────────────────
 export default function Tools() {
+  const { domain, domains, domainsLoading } = useDomain();
+
   const [tools, setTools]         = useState<Tool[]>([]);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState("");
@@ -102,11 +108,12 @@ export default function Tools() {
 
   const firstInputRef = useRef<HTMLInputElement>(null);
 
-  // Load tools on mount
+  // Load tools (re-run when global domain changes)
   useEffect(() => {
     setLoading(true);
+    const params = domain ? { domain } : {};
     api
-      .get<{ tools: Tool[] }>("/tools")
+      .get<{ tools: Tool[] }>("/tools", { params })
       .then((res) => setTools(res.data.tools))
       .catch((err) => {
         const detail =
@@ -116,7 +123,7 @@ export default function Tools() {
         setError(`GET /api/tools falhou: ${detail}`);
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [domain]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Focus first input when modal opens
   useEffect(() => {
@@ -131,16 +138,28 @@ export default function Tools() {
     api.get<{ host: string }>("/workspace-host").then((r) => setWorkspaceHost(r.data.host));
   }, [workspaceHost]);
 
-  // Load MCP resources when kind changes inside modal
+  // Clear cached resources whenever domain changes so they reload for the new workspace
   useEffect(() => {
-    if (!showModal) return;
+    setGenieRooms([]);
+    setVsIndexes([]);
+    setUcFunctions([]);
+    setAgentsList([]);
+    setForm((prev) => ({ ...prev, ref: "" }));
     setRefError("");
     setManualId("");
+  }, [form.domain]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load MCP resources when kind or domain changes inside modal
+  useEffect(() => {
+    if (!showModal || !form.domain) return;
+    setRefError("");
+    setManualId("");
+    const domainParam = { params: { domain: form.domain } };
 
     if (form.kind === "mcp_genie" && genieRooms.length === 0) {
       setRefLoading(true);
       api
-        .get<{ rooms: GenieRoom[]; host?: string }>("/genie-rooms")
+        .get<{ rooms: GenieRoom[]; host?: string }>("/genie-rooms", domainParam)
         .then((res) => {
           setGenieRooms(res.data.rooms);
           if (res.data.host) setWorkspaceHost(res.data.host);
@@ -152,7 +171,7 @@ export default function Tools() {
     if (form.kind === "mcp_vector_search" && vsIndexes.length === 0) {
       setRefLoading(true);
       api
-        .get<{ indexes: VsIndex[] }>("/vector-search-indexes")
+        .get<{ indexes: VsIndex[] }>("/vector-search-indexes", domainParam)
         .then((res) => setVsIndexes(res.data.indexes))
         .catch(() => setRefError("listing_failed"))
         .finally(() => setRefLoading(false));
@@ -161,7 +180,7 @@ export default function Tools() {
     if (form.kind === "skill" && ucFunctions.length === 0) {
       setRefLoading(true);
       api
-        .get<{ functions: string[] }>("/uc-functions")
+        .get<{ functions: string[] }>("/uc-functions", domainParam)
         .then((res) => setUcFunctions(res.data.functions))
         .catch(() => setRefError("listing_failed"))
         .finally(() => setRefLoading(false));
@@ -170,16 +189,16 @@ export default function Tools() {
     if (form.kind === "agent_call" && agentsList.length === 0) {
       setRefLoading(true);
       api
-        .get<{ agents: AgentEntry[] }>("/agents-list")
+        .get<{ agents: AgentEntry[] }>("/agents-list", domainParam)
         .then((res) => setAgentsList(res.data.agents))
         .catch(() => setRefError("listing_failed"))
         .finally(() => setRefLoading(false));
     }
 
-    // Reset ref when kind changes
+    // Reset ref when kind changes (but not when domain triggers this — domain effect handles it)
     setForm((prev) => ({ ...prev, ref: "" }));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.kind, showModal]);
+  }, [form.kind, form.domain, showModal]);
 
   // ── Filtered list ────────────────────────────────────────────
   const filtered = tools.filter((t) => {
@@ -221,7 +240,7 @@ export default function Tools() {
   }
 
   function openModal() {
-    setForm(EMPTY_FORM);
+    setForm({ ...EMPTY_FORM, domain });
     setSaveError("");
     setSaveOk("");
     setRefError("");
@@ -562,6 +581,7 @@ export default function Tools() {
               <thead>
                 <tr>
                   <th>Name</th>
+                  <th>Domínio</th>
                   <th>Kind</th>
                   <th>Status</th>
                   <th>Ambientes</th>
@@ -575,6 +595,9 @@ export default function Tools() {
                   <tr key={tool.tool_name}>
                     <td className="tl-col-name">
                       <span className="tl-tool-name">{tool.tool_name}</span>
+                    </td>
+                    <td>
+                      <span className="tl-domain-badge">{tool.domain || "default"}</span>
                     </td>
                     <td>
                       <span className={`tl-badge kind-${tool.kind}`}>
@@ -795,75 +818,94 @@ export default function Tools() {
               {saveOk && <div className="tl-save-ok">{saveOk}</div>}
               {saveError && <div className="tl-save-error">{saveError}</div>}
 
-              <div className="tl-form-row">
-                <div className="tl-field tl-field-grow">
+              {/* ── Domain — locked to global selection ── */}
+              <div className="tl-field tl-field-domain-first">
+                <label className="tl-label">Domínio</label>
+                <select
+                  className="tl-input"
+                  value={form.domain}
+                  disabled
+                >
+                  {domains.map((d) => <option key={d} value={d}>{d}</option>)}
+                  {!form.domain && <option value="">Nenhum domínio selecionado</option>}
+                </select>
+                <span className="tl-field-hint">
+                  Definido globalmente no topo da página. Os recursos serão buscados no workspace de <strong>{form.domain || "—"}</strong>.
+                </span>
+              </div>
+
+              {/* ── Step 2: rest of form — locked until domain is chosen ── */}
+              <fieldset className="tl-form-fieldset" disabled={!form.domain}>
+                <div className="tl-form-row">
+                  <div className="tl-field tl-field-grow">
+                    <label className="tl-label">
+                      Nome <span className="req">*</span>
+                    </label>
+                    <input
+                      ref={firstInputRef}
+                      className="tl-input"
+                      placeholder="ex: hris_vector_search"
+                      value={form.tool_name}
+                      onChange={(e) => setForm({ ...form, tool_name: e.target.value })}
+                      required
+                    />
+                  </div>
+                  <div className="tl-field">
+                    <label className="tl-label">Tipo <span className="req">*</span></label>
+                    <select
+                      className="tl-input"
+                      value={form.kind}
+                      onChange={(e) =>
+                        setForm({ ...form, kind: e.target.value as ToolKind, ref: "" })
+                      }
+                    >
+                      {KIND_OPTIONS.map((k) => (
+                        <option key={k} value={k}>{KIND_LABELS[k]}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="tl-field">
                   <label className="tl-label">
-                    Nome <span className="req">*</span>
+                    {form.kind === "mcp_genie"
+                      ? "Espaço Genie"
+                      : form.kind === "mcp_vector_search"
+                      ? "Índice Vector Search"
+                      : form.kind === "skill"
+                      ? "UC Function"
+                      : "Agent destino"}
+                    {" "}<span className="req">*</span>
+                    {form.ref && (
+                      <span className="tl-label-hint tl-ref-preview" title={form.ref}>
+                        → {form.ref}
+                      </span>
+                    )}
                   </label>
+                  <RefField />
+                </div>
+
+                <div className="tl-field">
+                  <label className="tl-label">Descrição</label>
                   <input
-                    ref={firstInputRef}
                     className="tl-input"
-                    placeholder="ex: hris_vector_search"
-                    value={form.tool_name}
-                    onChange={(e) => setForm({ ...form, tool_name: e.target.value })}
-                    required
+                    placeholder="O que essa tool faz?"
+                    value={form.description}
+                    onChange={(e) => setForm({ ...form, description: e.target.value })}
                   />
                 </div>
+
                 <div className="tl-field">
-                  <label className="tl-label">Tipo <span className="req">*</span></label>
-                  <select
+                  <label className="tl-label">Owner (e-mail)</label>
+                  <input
                     className="tl-input"
-                    value={form.kind}
-                    onChange={(e) =>
-                      setForm({ ...form, kind: e.target.value as ToolKind, ref: "" })
-                    }
-                  >
-                    {KIND_OPTIONS.map((k) => (
-                      <option key={k} value={k}>{KIND_LABELS[k]}</option>
-                    ))}
-                  </select>
+                    type="email"
+                    placeholder="seu-time@empresa.com"
+                    value={form.owner}
+                    onChange={(e) => setForm({ ...form, owner: e.target.value })}
+                  />
                 </div>
-              </div>
-
-              <div className="tl-field">
-                <label className="tl-label">
-                  {form.kind === "mcp_genie"
-                    ? "Espaço Genie"
-                    : form.kind === "mcp_vector_search"
-                    ? "Índice Vector Search"
-                    : form.kind === "skill"
-                    ? "UC Function"
-                    : "Agent destino"}
-                  {" "}<span className="req">*</span>
-                  {form.ref && (
-                    <span className="tl-label-hint tl-ref-preview" title={form.ref}>
-                      → {form.ref}
-                    </span>
-                  )}
-                </label>
-                <RefField />
-              </div>
-
-              <div className="tl-field">
-                <label className="tl-label">Descrição</label>
-                <input
-                  className="tl-input"
-                  placeholder="O que essa tool faz?"
-                  value={form.description}
-                  onChange={(e) => setForm({ ...form, description: e.target.value })}
-                />
-              </div>
-
-              <div className="tl-field">
-                <label className="tl-label">Owner (e-mail)</label>
-                <input
-                  className="tl-input"
-                  type="email"
-                  placeholder="seu-time@empresa.com"
-                  value={form.owner}
-                  onChange={(e) => setForm({ ...form, owner: e.target.value })}
-                />
-              </div>
+              </fieldset>
 
               <div className="tl-modal-footer">
                 <button
@@ -877,7 +919,7 @@ export default function Tools() {
                 <button
                   type="submit"
                   className="tl-submit-btn"
-                  disabled={saving || !form.tool_name.trim() || !form.ref.trim()}
+                  disabled={saving || !form.domain || !form.tool_name.trim() || !form.ref.trim()}
                 >
                   {saving ? "Registrando..." : "Registrar tool"}
                 </button>

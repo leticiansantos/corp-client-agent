@@ -13,6 +13,14 @@ from app.config import settings
 
 app = FastAPI(title="Corp Agent Client API", version="0.1.0")
 
+@app.on_event("startup")
+def _startup():
+    try:
+        from app.api import lakebase
+        lakebase.ensure_schema()
+    except Exception:
+        pass  # Lakebase not configured yet — skip migration
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

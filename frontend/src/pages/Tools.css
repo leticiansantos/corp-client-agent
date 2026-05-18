@@ -355,6 +355,44 @@
   flex: 1;
 }
 
+/* Domain-first field — full width, visually prominent */
+.tl-field-domain-first {
+  background: #F5F3FF;
+  border: 1.5px solid #C4B5FD;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.tl-field-domain-first .tl-label {
+  color: #5B21B6;
+}
+.tl-field-domain-first .tl-input {
+  background: #fff;
+}
+
+/* Hint text below domain select */
+.tl-field-hint {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+.tl-field-hint-warn {
+  color: #92400E;
+}
+
+/* Fieldset wrapper — removes default border/padding, applies disabled opacity */
+.tl-form-fieldset {
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.tl-form-fieldset:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 .tl-label {
   font-size: 0.78rem;
   font-weight: 600;
@@ -791,6 +829,16 @@
 .tl-env-dev     { background: #dcfce7; color: #15803d; }
 .tl-env-staging { background: #fef3c7; color: #92400e; }
 .tl-env-prod    { background: #dbeafe; color: #1d4ed8; }
+
+.tl-domain-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  background: #EDE9FE;
+  color: #5B21B6;
+}
 
 .tl-env-none {
   color: var(--color-text-muted);

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import api from "../services/api";
+import { useDomain } from "../contexts/DomainContext";
 import "./Agents.css";
 
 // ── Types ──────────────────────────────────────────────────────
@@ -9,6 +10,7 @@ type AgentType   = "qa_docs" | "data_assistant" | "conversational" | "mixed";
 interface Agent {
   agent_id: string;
   agent_name: string;
+  domain: string;
   agent_type: AgentType;
   owner_principal: string;
   description: string;
@@ -49,6 +51,7 @@ interface EvalEntry {
 interface NewAgentForm {
   agent_id: string;
   agent_name: string;
+  domain: string;
   agent_type: AgentType;
   owner_principal: string;
   description: string;
@@ -64,6 +67,7 @@ interface NewAgentForm {
 const EMPTY_FORM: NewAgentForm = {
   agent_id:              "",
   agent_name:            "",
+  domain:                "default",
   agent_type:            "conversational",
   owner_principal:       "",
   description:           "",
@@ -107,6 +111,8 @@ const STATUS_TRANSITIONS: Record<AgentStatus, { label: string; next: AgentStatus
 
 // ── Component ──────────────────────────────────────────────────
 export default function Agents() {
+  const { domain, domains } = useDomain();
+
   const [agents, setAgents]     = useState<Agent[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState("");
@@ -176,11 +182,12 @@ export default function Agents() {
 
   const firstInputRef = useRef<HTMLInputElement>(null);
 
-  // ── Load agents ───────────────────────────────────────────────
+  // ── Load agents (re-run when global domain changes) ───────────
   function loadAgents() {
     setLoading(true);
+    const params = domain ? { domain } : {};
     api
-      .get<{ agents: Agent[] }>("/agents")
+      .get<{ agents: Agent[] }>("/agents", { params })
       .then((r) => setAgents(r.data.agents))
       .catch((err) => {
         const detail = err?.response?.data?.detail ?? err?.message ?? "Erro desconhecido";
@@ -189,7 +196,7 @@ export default function Agents() {
       .finally(() => setLoading(false));
   }
 
-  useEffect(loadAgents, []);
+  useEffect(loadAgents, [domain]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load active tools and approved models when modal opens
   useEffect(() => {
@@ -210,17 +217,17 @@ export default function Agents() {
         })
         .finally(() => setToolsLoading(false));
     }
-    if (approvedModels.length === 0) {
+    if (approvedModels.length === 0 && domain) {
       setModelsLoading(true);
       api
-        .get<{ models: { name: string; model_name: string; state: string; approval_status: string }[] }>("/settings/models")
+        .get<{ models: { name: string; model_name: string; state: string; approval_status: string }[] }>(`/settings/domains/${domain}/models`)
         .then((r) => {
           setApprovedModels(r.data.models.filter((m) => m.approval_status === "approved"));
         })
         .catch(() => {})
         .finally(() => setModelsLoading(false));
     }
-  }, [showModal]);
+  }, [showModal, domain]);
 
   useEffect(() => {
     if (showModal) setTimeout(() => firstInputRef.current?.focus(), 50);
@@ -298,7 +305,7 @@ export default function Agents() {
 
   function openModal() {
     setEditingAgent(null);
-    setForm(EMPTY_FORM);
+    setForm({ ...EMPTY_FORM, domain: domain || "default" });
     setSaveError("");
     setSaveOk("");
     setFormTab("basic");
@@ -314,6 +321,7 @@ export default function Agents() {
     setForm({
       agent_id:              agent.agent_id,
       agent_name:            agent.agent_name,
+      domain:                agent.domain || "default",
       agent_type:            agent.agent_type,
       owner_principal:       agent.owner_principal || "",
       description:           agent.description || "",
@@ -641,6 +649,7 @@ export default function Agents() {
               <thead>
                 <tr>
                   <th>Nome</th>
+                  <th>Domínio</th>
                   <th>Tipo</th>
                   <th>Status</th>
                   <th>Env</th>
@@ -658,6 +667,9 @@ export default function Agents() {
                         <span className="ag-agent-name">{a.agent_name}</span>
                         <code className="ag-agent-id">{a.agent_id}</code>
                       </div>
+                    </td>
+                    <td>
+                      <span className="ag-domain-badge">{a.domain || "default"}</span>
                     </td>
                     <td>
                       <span className={`ag-badge type-${a.agent_type}`}>
@@ -975,6 +987,22 @@ export default function Agents() {
                 {/* Tab 1: Basic */}
                 {formTab === "basic" && (
                   <div className="ag-form-section">
+                    {/* Domain — locked to global selection */}
+                    <div className="ag-field ag-field-domain-first">
+                      <label className="ag-label">Domínio</label>
+                      <select
+                        className="ag-input"
+                        value={form.domain}
+                        disabled
+                      >
+                        {domains.map((d) => <option key={d} value={d}>{d}</option>)}
+                        {!form.domain && <option value="">Nenhum domínio selecionado</option>}
+                      </select>
+                      <span className="ag-field-hint">
+                        Definido globalmente no topo da página. Os recursos serão buscados no workspace de <strong>{form.domain || "—"}</strong>.
+                      </span>
+                    </div>
+
                     <div className="ag-form-row">
                       <div className="ag-field ag-field-grow">
                         <label className="ag-label">ID do Agente {!isEditMode && <span className="req">*</span>}</label>
@@ -1005,7 +1033,7 @@ export default function Agents() {
                       </div>
                     </div>
 
-                    <div className="ag-field">
+                    <div className="ag-field ag-field-grow">
                       <label className="ag-label">Nome {!isReadOnly && <span className="req">*</span>}</label>
                       <input
                         className="ag-input"
@@ -1071,8 +1099,8 @@ export default function Agents() {
                       )}
                       <span className="ag-hint">
                         {approvedModels.length === 0 && !modelsLoading
-                          ? "Nenhum endpoint aprovado em Settings. Informe o nome manualmente."
-                          : "Endpoints aprovados em Settings → Models."}
+                          ? "Nenhum modelo aprovado para este domínio. Configure em Settings → Domínios."
+                          : `Modelos aprovados para o domínio "${domain}".`}
                       </span>
                     </div>
 

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from app.api.settings import (
     ENDPOINT_NAME_TPL,
     _get_env_config_from_db,
-    _get_env_workspace_client,
+    _get_env_session,
 )
 
 router = APIRouter(prefix="/api/run")
@@ -64,9 +64,8 @@ def chat(body: ChatRequest):
     endpoint_name = ENDPOINT_NAME_TPL.format(env=body.env)
 
     try:
-        w = _get_env_workspace_client(env_cfg)
-        result = w.api_client.do(
-            "POST",
+        sess = _get_env_session(env_cfg)
+        result = sess._post(
             f"/serving-endpoints/{endpoint_name}/invocations",
             body={
                 "input": [{"role": m.role, "content": m.content} for m in body.messages],

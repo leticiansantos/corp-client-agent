@@ -1,8 +1,9 @@
 """
 Tools registry API.
 
-tools_config lives in a single Lakebase (PostgreSQL) database shared across all
-environments. The `environment` column (dev / staging / prod) is a lifecycle flag.
+tools_config lives in per-domain PostgreSQL schemas ("{domain}".tools_config).
+Global workspace config is in app.domain_envs.
+The `environment` column (dev / staging / prod) is a lifecycle flag.
 Workspace API calls (Genie, Vector Search, UC functions) still go to each env workspace.
 """
 
@@ -89,12 +90,24 @@ def _env_client(env: str) -> tuple[WorkspaceClient, str, str, str] | None:
 
 
 def _get_domain_config(domain: str, env: str = "dev") -> dict | None:
-    """Read workspace config for a domain+env from domain_envs (Lakebase)."""
+    """Read workspace config for a domain+env from app.domain_envs."""
     rows = lakebase.execute(
-        "SELECT workspace_url, token FROM domain_envs WHERE domain = %s AND env = %s",
+        "SELECT workspace_url, token FROM app.domain_envs WHERE domain = %s AND env = %s",
         (domain, env),
     )
     return rows[0] if rows else None
+
+
+def _find_tool_domain(tool_name: str) -> str | None:
+    """Search all domain schemas for a tool; return its domain or None."""
+    for domain in lakebase.list_domain_schemas():
+        row = lakebase.execute_one(
+            f'SELECT tool_name FROM "{domain}".tools_config WHERE tool_name = %s',
+            (tool_name,),
+        )
+        if row:
+            return domain
+    return None
 
 
 def _domain_client(domain: str, env: str = "dev") -> tuple[WorkspaceClient, str] | None:
@@ -169,26 +182,23 @@ def _sql(w: WorkspaceClient, warehouse_id: str, statement: str):
 
 @router.get("/tools")
 def list_tools(domain: str | None = None):
-    """List tools from Lakebase, optionally filtered by domain."""
+    """List tools from Lakebase. If domain is provided, reads from that domain's schema."""
+    cols = "tool_name, kind, ref, description, owner, status, environment, created_at, created_by, approved_by, approved_at"
+    order = "ORDER BY CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END, tool_name"
+
     if domain:
-        rows = lakebase.execute("""
-            SELECT tool_name, kind, ref, description, owner, status, environment, domain,
-                   created_at, created_by, approved_by, approved_at
-            FROM tools_config
-            WHERE domain = %s
-            ORDER BY
-                CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
-                tool_name
-        """, (domain,))
+        rows = lakebase.execute(
+            f'SELECT {cols} FROM "{domain}".tools_config {order}',
+        )
+        for r in rows:
+            r["domain"] = domain
     else:
-        rows = lakebase.execute("""
-            SELECT tool_name, kind, ref, description, owner, status, environment, domain,
-                   created_at, created_by, approved_by, approved_at
-            FROM tools_config
-            ORDER BY
-                CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
-                tool_name
-        """)
+        rows = []
+        for d in lakebase.list_domain_schemas():
+            d_rows = lakebase.execute(f'SELECT {cols} FROM "{d}".tools_config {order}')
+            for r in d_rows:
+                r["domain"] = d
+            rows.extend(d_rows)
     return {"tools": rows}
 
 
@@ -205,18 +215,17 @@ class RegisterToolRequest(BaseModel):
 
 @router.post("/tools", status_code=status.HTTP_201_CREATED)
 def register_tool(body: RegisterToolRequest):
-    """Register a new tool into Lakebase with environment='dev'."""
-    lakebase.execute("""
-        INSERT INTO tools_config
-            (tool_name, kind, ref, description, owner, environment, domain, status, created_at, created_by)
-        VALUES (%s, %s, %s, %s, %s, 'dev', %s, 'active', NOW(), %s)
+    """Register a new tool into the domain's Lakebase schema with environment='dev'."""
+    lakebase.execute(f"""
+        INSERT INTO "{body.domain}".tools_config
+            (tool_name, kind, ref, description, owner, environment, status, created_at, created_by)
+        VALUES (%s, %s, %s, %s, %s, 'dev', 'active', NOW(), %s)
         ON CONFLICT (tool_name) DO UPDATE SET
             kind        = EXCLUDED.kind,
             ref         = EXCLUDED.ref,
             description = EXCLUDED.description,
-            owner       = EXCLUDED.owner,
-            domain      = EXCLUDED.domain
-    """, (body.tool_name, body.kind, body.ref, body.description, body.owner, body.domain, body.owner))
+            owner       = EXCLUDED.owner
+    """, (body.tool_name, body.kind, body.ref, body.description, body.owner, body.owner))
     return {"tool_name": body.tool_name, "status": "active", "domain": body.domain}
 
 
@@ -338,20 +347,24 @@ def list_vector_search_indexes(domain: str | None = Query(default=None)):
 # ── List registered agents ────────────────────────────────────
 @router.get("/agents-list")
 def list_agents_for_tool(domain: str | None = Query(default=None)):
-    """Lists agents from agents_config in Lakebase filtered by domain (dev environment)."""
+    """Lists agents from agents_config filtered by domain (dev environment)."""
     if domain:
         rows = lakebase.execute(
-            "SELECT agent_id, name AS agent_name, agent_type, status FROM agents_config "
-            "WHERE environment = 'dev' AND domain = %s ORDER BY name",
-            (domain,),
+            f"SELECT agent_id, name AS agent_name, agent_type, status "
+            f'FROM "{domain}".agents_config WHERE environment = \'dev\' ORDER BY name',
         )
+        for r in rows:
+            r["domain"] = domain
     else:
-        rows = lakebase.execute("""
-            SELECT agent_id, name AS agent_name, agent_type, status
-            FROM agents_config
-            WHERE environment = 'dev'
-            ORDER BY name
-        """)
+        rows = []
+        for d in lakebase.list_domain_schemas():
+            d_rows = lakebase.execute(
+                f"SELECT agent_id, name AS agent_name, agent_type, status "
+                f'FROM "{d}".agents_config WHERE environment = \'dev\' ORDER BY name',
+            )
+            for r in d_rows:
+                r["domain"] = d
+            rows.extend(d_rows)
     return {"agents": rows}
 
 
@@ -388,7 +401,7 @@ class PatchToolStatusRequest(BaseModel):
 
 
 @router.patch("/tools/{tool_name}/status")
-def update_tool_status(tool_name: str, body: PatchToolStatusRequest):
+def update_tool_status(tool_name: str, body: PatchToolStatusRequest, domain: str | None = Query(default=None)):
     """Update tool status in Lakebase."""
     allowed = {"active", "inactive", "deprecated", "pending_review"}
     if body.new_status not in allowed:
@@ -396,13 +409,11 @@ def update_tool_status(tool_name: str, body: PatchToolStatusRequest):
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Status inválido. Valores permitidos: {', '.join(sorted(allowed))}",
         )
-    row = lakebase.execute_one(
-        "SELECT tool_name FROM tools_config WHERE tool_name = %s", (tool_name,)
-    )
-    if row is None:
+    d = domain or _find_tool_domain(tool_name)
+    if d is None:
         raise HTTPException(status_code=404, detail="Tool não encontrada.")
-    lakebase.execute("""
-        UPDATE tools_config
+    lakebase.execute(f"""
+        UPDATE "{d}".tools_config
         SET status      = %s,
             approved_by = %s,
             approved_at = NOW()
@@ -413,14 +424,12 @@ def update_tool_status(tool_name: str, body: PatchToolStatusRequest):
 
 # ── Delete tool ───────────────────────────────────────────────
 @router.delete("/tools/{tool_name}", status_code=status.HTTP_200_OK)
-def delete_tool(tool_name: str):
+def delete_tool(tool_name: str, domain: str | None = Query(default=None)):
     """Permanently delete a tool from Lakebase."""
-    row = lakebase.execute_one(
-        "SELECT tool_name FROM tools_config WHERE tool_name = %s", (tool_name,)
-    )
-    if row is None:
+    d = domain or _find_tool_domain(tool_name)
+    if d is None:
         raise HTTPException(status_code=404, detail="Tool não encontrada.")
-    lakebase.execute("DELETE FROM tools_config WHERE tool_name = %s", (tool_name,))
+    lakebase.execute(f'DELETE FROM "{d}".tools_config WHERE tool_name = %s', (tool_name,))
     return {"tool_name": tool_name, "deleted": True}
 
 
@@ -679,7 +688,7 @@ def _promote_uc_function(
 
 
 @router.post("/tools/{tool_name}/promote", status_code=status.HTTP_200_OK)
-def promote_tool(tool_name: str, body: PromoteToolRequest):
+def promote_tool(tool_name: str, body: PromoteToolRequest, domain: str | None = Query(default=None)):
     """
     Promote a tool to the next environment (dev→staging or staging→prod).
 
@@ -689,8 +698,11 @@ def promote_tool(tool_name: str, body: PromoteToolRequest):
     allowed_transitions = {"dev": "staging", "staging": "prod"}
 
     # 1. Find tool in Lakebase
+    d = domain or _find_tool_domain(tool_name)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Tool não encontrada.")
     tool = lakebase.execute_one(
-        "SELECT tool_name, kind, ref, description, owner, environment FROM tools_config WHERE tool_name = %s",
+        f'SELECT tool_name, kind, ref, description, owner, environment FROM "{d}".tools_config WHERE tool_name = %s',
         (tool_name,),
     )
     if tool is None:
@@ -745,8 +757,8 @@ def promote_tool(tool_name: str, body: PromoteToolRequest):
         target_ref = src_ref
 
     # 4. Update environment flag and ref in Lakebase (no record copy)
-    lakebase.execute("""
-        UPDATE tools_config
+    lakebase.execute(f"""
+        UPDATE "{d}".tools_config
         SET environment = %s,
             ref         = %s,
             status      = 'active',

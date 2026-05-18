@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import api from "../services/api";
 import { useDomain } from "../contexts/DomainContext";
+import { useAdmin } from "../contexts/AdminContext";
 import "./Agents.css";
 
 // ── Types ──────────────────────────────────────────────────────
@@ -112,6 +113,7 @@ const STATUS_TRANSITIONS: Record<AgentStatus, { label: string; next: AgentStatus
 // ── Component ──────────────────────────────────────────────────
 export default function Agents() {
   const { domain, domains } = useDomain();
+  const { isAdmin } = useAdmin();
 
   const [agents, setAgents]     = useState<Agent[]>([]);
   const [loading, setLoading]   = useState(true);
@@ -119,6 +121,11 @@ export default function Agents() {
   const [search, setSearch]     = useState("");
   const [statusFilter, setStatusFilter] = useState<AgentStatus | "all">("all");
   const [activeTab, setActiveTab] = useState<"agents" | "admin">("agents");
+
+  // When admin mode is turned off, fall back to agents tab
+  useEffect(() => {
+    if (!isAdmin && activeTab === "admin") setActiveTab("agents");
+  }, [isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Modal (create / edit / view)
   const [showModal, setShowModal]       = useState(false);
@@ -582,15 +589,17 @@ export default function Agents() {
           >
             Todos os Agentes
           </button>
-          <button
-            className={`ag-tab${activeTab === "admin" ? " ag-tab-active" : ""}`}
-            onClick={() => setActiveTab("admin")}
-          >
-            Admin
-            {pendingAgents.length > 0 && (
-              <span className="ag-tab-badge">{pendingAgents.length}</span>
-            )}
-          </button>
+          {isAdmin && (
+            <button
+              className={`ag-tab${activeTab === "admin" ? " ag-tab-active" : ""}`}
+              onClick={() => setActiveTab("admin")}
+            >
+              Admin
+              {pendingAgents.length > 0 && (
+                <span className="ag-tab-badge">{pendingAgents.length}</span>
+              )}
+            </button>
+          )}
         </div>
 
         <div className="ag-header-right">

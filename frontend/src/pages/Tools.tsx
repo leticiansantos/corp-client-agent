@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import api from "../services/api";
 import { useDomain } from "../contexts/DomainContext";
+import { useAdmin } from "../contexts/AdminContext";
 import "./Tools.css";
 
 // ── Types ──────────────────────────────────────────────────────
@@ -76,6 +77,7 @@ const EMPTY_FORM: NewToolForm = {
 // ── Component ──────────────────────────────────────────────────
 export default function Tools() {
   const { domain, domains, domainsLoading } = useDomain();
+  const { isAdmin } = useAdmin();
 
   const [tools, setTools]         = useState<Tool[]>([]);
   const [loading, setLoading]     = useState(true);
@@ -83,6 +85,11 @@ export default function Tools() {
   const [search, setSearch]       = useState("");
   const [kindFilter, setKindFilter] = useState<ToolKind | "all">("all");
   const [activeTab, setActiveTab] = useState<"tools" | "admin">("tools");
+
+  // When admin mode is turned off, fall back to tools tab
+  useEffect(() => {
+    if (!isAdmin && activeTab === "admin") setActiveTab("tools");
+  }, [isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
   const [promoting, setPromoting] = useState<Record<string, boolean>>({});
   const [deleting, setDeleting]     = useState<Record<string, boolean>>({});
   const [deleteMsg, setDeleteMsg]   = useState<Record<string, string>>({});
@@ -507,15 +514,17 @@ export default function Tools() {
           >
             Todas as tools
           </button>
-          <button
-            className={`tl-tab${activeTab === "admin" ? " tl-tab-active" : ""}`}
-            onClick={() => setActiveTab("admin")}
-          >
-            Admin
-            {pendingTools.length > 0 && (
-              <span className="tl-tab-badge">{pendingTools.length}</span>
-            )}
-          </button>
+          {isAdmin && (
+            <button
+              className={`tl-tab${activeTab === "admin" ? " tl-tab-active" : ""}`}
+              onClick={() => setActiveTab("admin")}
+            >
+              Admin
+              {pendingTools.length > 0 && (
+                <span className="tl-tab-badge">{pendingTools.length}</span>
+              )}
+            </button>
+          )}
         </div>
 
         <div className="tl-header-right">

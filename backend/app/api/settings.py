@@ -515,11 +515,17 @@ def _generate_deploy_script_lakebase(
     catalog: str, schema: str, environment: str, domain: str,
     workspace_url: str = "", token: str = "",
     lakebase_host: str = "", lakebase_database: str = "", lakebase_username: str = "",
+    lakebase_databricks_host: str = "",
+    lakebase_client_id: str = "", lakebase_client_secret: str = "",
 ) -> str:
     """Generate a deploy notebook for the Lakebase-aware corp_agent_framework.
 
     The serving endpoint reads agent/tool config from Lakebase (PostgreSQL),
     so no Delta catalog/schema/warehouse_id is needed at inference time.
+
+    LAKEBASE_CLIENT_* are credentials from the workspace where Lakebase is hosted
+    (fevm-leticia-santos-stable). They are separate from the domain workspace
+    credentials (DATABRICKS_*) and allow cross-workspace Lakebase authentication.
     """
     endpoint_name = DOMAIN_ENDPOINT_NAME_TPL.format(domain=domain, env=environment)
     model_name    = f"{catalog}.{schema}.{_CORP_MODEL_SUFFIX}_{environment}"
@@ -610,13 +616,19 @@ ep_config = EndpointCoreConfigInput(
             workload_size="Small",
             scale_to_zero_enabled=True,
             environment_vars={{
-                # Env workspace credentials — used by agent for Genie/VS calls
+                # Domain workspace credentials — used for Genie/VS calls
                 "DATABRICKS_HOST":            "{workspace_url}",
                 "DATABRICKS_TOKEN":           "{token}",
                 # Lakebase (PostgreSQL) — central store for all environments
                 "LAKEBASE_HOST":              "{lakebase_host}",
                 "LAKEBASE_DATABASE":          "{lakebase_database}",
                 "LAKEBASE_USERNAME":          "{lakebase_username}",
+                # Lakebase auth credentials — from the workspace where Lakebase is hosted.
+                # Required when the serving endpoint runs in a different workspace than Lakebase.
+                # _pg.py uses these (LAKEBASE_CLIENT_*) before falling back to DATABRICKS_*.
+                "LAKEBASE_DATABRICKS_HOST":   "{lakebase_databricks_host}",
+                "LAKEBASE_CLIENT_ID":         "{lakebase_client_id}",
+                "LAKEBASE_CLIENT_SECRET":     "{lakebase_client_secret}",
             }},
         )
     ],
@@ -1144,27 +1156,11 @@ def list_models():
 
 # ── Domain envs — Lakebase (PostgreSQL) ────────────────────────
 
-def _ensure_domain_table_pg() -> None:
-    from app.api import lakebase
-    lakebase.execute("""
-        CREATE TABLE IF NOT EXISTS domain_envs (
-            domain        TEXT        NOT NULL,
-            env           TEXT        NOT NULL,
-            workspace_url TEXT,
-            token         TEXT,
-            notes         TEXT,
-            updated_at    TIMESTAMPTZ DEFAULT NOW(),
-            PRIMARY KEY (domain, env)
-        )
-    """)
-
-
 def _get_all_domain_envs() -> list[dict]:
     from app.api import lakebase
-    _ensure_domain_table_pg()
     return lakebase.execute("""
         SELECT domain, env, workspace_url, token, notes, updated_at
-        FROM domain_envs
+        FROM app.domain_envs
         ORDER BY domain,
                  CASE env WHEN 'dev' THEN 1 WHEN 'staging' THEN 2 WHEN 'prod' THEN 3 ELSE 4 END
     """)
@@ -1236,6 +1232,9 @@ def _deploy_domain_background(domain: str, env: str, env_cfg: dict) -> None:
             lakebase_host=settings.lakebase_host,
             lakebase_database=settings.lakebase_database,
             lakebase_username=settings.lakebase_username,
+            lakebase_databricks_host=settings.databricks_host,
+            lakebase_client_id=settings.databricks_client_id,
+            lakebase_client_secret=settings.databricks_client_secret,
         )
         notebook_dir  = "/Shared/_corp_client_agent"
         notebook_path = f"{notebook_dir}/deploy_framework_{domain}_{env}"
@@ -1341,10 +1340,9 @@ def save_domain_env(domain: str, env: str, body: SaveDomainEnvRequest):
         raise HTTPException(status_code=422, detail=f"Ambiente inválido: '{env}'")
     if not settings.lakebase_host or not settings.lakebase_username:
         raise HTTPException(status_code=503, detail="Lakebase não configurado.")
-    _ensure_domain_table_pg()
     from app.api import lakebase
     lakebase.execute("""
-        INSERT INTO domain_envs (domain, env, workspace_url, token, notes, updated_at)
+        INSERT INTO app.domain_envs (domain, env, workspace_url, token, notes, updated_at)
         VALUES (%s, %s, %s, %s, %s, NOW())
         ON CONFLICT (domain, env) DO UPDATE SET
             workspace_url = EXCLUDED.workspace_url,
@@ -1352,13 +1350,44 @@ def save_domain_env(domain: str, env: str, body: SaveDomainEnvRequest):
             notes         = EXCLUDED.notes,
             updated_at    = NOW()
     """, (domain, env, body.workspace_url or "", body.token or "", body.notes or ""))
+    # Create per-domain schema if this is the first time this domain is registered
+    try:
+        lakebase.create_domain_schema(domain)
+    except Exception as exc:
+        _log.warning("Could not create domain schema '%s': %s", domain, exc)
     return {"domain": domain, "env": env, "saved": True}
+
+
+@router.post("/domains/{domain}")
+def create_domain(domain: str):
+    """Register a new domain: create PostgreSQL schema + placeholder rows in app.domain_envs."""
+    import re
+    if not re.fullmatch(r"[a-z0-9][a-z0-9\-]*[a-z0-9]|[a-z0-9]", domain):
+        raise HTTPException(status_code=422, detail="Nome de domínio inválido.")
+    if not settings.lakebase_host or not settings.lakebase_username:
+        raise HTTPException(status_code=503, detail="Lakebase não configurado.")
+    from app.api import lakebase
+    # Create per-domain PostgreSQL schema (idempotent)
+    lakebase.create_domain_schema(domain)
+    # Insert placeholder rows for all 3 envs so the domain appears in list_domains
+    for env in ENVS:
+        lakebase.execute("""
+            INSERT INTO app.domain_envs (domain, env, workspace_url, token, notes, updated_at)
+            VALUES (%s, %s, '', '', '', NOW())
+            ON CONFLICT (domain, env) DO NOTHING
+        """, (domain, env))
+    return {"domain": domain, "created": True}
 
 
 @router.delete("/domains/{domain}")
 def delete_domain(domain: str):
     from app.api import lakebase
-    lakebase.execute("DELETE FROM domain_envs WHERE domain = %s", (domain,))
+    lakebase.execute("DELETE FROM app.domain_envs WHERE domain = %s", (domain,))
+    lakebase.execute("DELETE FROM app.domain_model_approvals WHERE domain = %s", (domain,))
+    try:
+        lakebase.execute(f'DROP SCHEMA IF EXISTS "{domain}" CASCADE')
+    except Exception as exc:
+        _log.warning("Could not drop schema '%s': %s", domain, exc)
     return {"domain": domain, "deleted": True}
 
 
@@ -1369,7 +1398,7 @@ def deploy_domain_env(domain: str, env: str):
 
     from app.api import lakebase
     env_cfg = lakebase.execute_one(
-        "SELECT workspace_url, token FROM domain_envs WHERE domain = %s AND env = %s",
+        "SELECT workspace_url, token FROM app.domain_envs WHERE domain = %s AND env = %s",
         (domain, env),
     )
 
@@ -1420,17 +1449,7 @@ def deploy_domain_env(domain: str, env: str):
 
 
 def _ensure_domain_model_approvals_table() -> None:
-    from app.api import lakebase
-    lakebase.execute("""
-        CREATE TABLE IF NOT EXISTS domain_model_approvals (
-            domain      TEXT NOT NULL,
-            model_name  TEXT NOT NULL,
-            status      TEXT NOT NULL DEFAULT 'pending',
-            notes       TEXT,
-            updated_at  TIMESTAMPTZ DEFAULT NOW(),
-            PRIMARY KEY (domain, model_name)
-        )
-    """)
+    pass  # Table is now created by lakebase.ensure_schema() at startup as app.domain_model_approvals
 
 
 @router.get("/domains/{domain}/models")
@@ -1444,14 +1463,14 @@ def list_domain_models(domain: str):
 
     # Per-domain approval statuses
     approval_rows = lakebase.execute(
-        "SELECT model_name, status, notes FROM domain_model_approvals WHERE domain = %s",
+        "SELECT model_name, status, notes FROM app.domain_model_approvals WHERE domain = %s",
         (domain,),
     )
     domain_approvals = {r["model_name"]: r for r in approval_rows}
 
     # Domain dev workspace config
     cfg_rows = lakebase.execute(
-        "SELECT workspace_url, token FROM domain_envs WHERE domain = %s AND env = 'dev'",
+        "SELECT workspace_url, token FROM app.domain_envs WHERE domain = %s AND env = 'dev'",
         (domain,),
     )
     if not cfg_rows or not cfg_rows[0].get("workspace_url") or not cfg_rows[0].get("token"):
@@ -1494,7 +1513,7 @@ def update_domain_model_status(domain: str, model_name: str, body: PatchModelSta
         )
     _ensure_domain_model_approvals_table()
     lakebase.execute("""
-        INSERT INTO domain_model_approvals (domain, model_name, status, notes, updated_at)
+        INSERT INTO app.domain_model_approvals (domain, model_name, status, notes, updated_at)
         VALUES (%s, %s, %s, %s, NOW())
         ON CONFLICT (domain, model_name) DO UPDATE SET
             status     = EXCLUDED.status,

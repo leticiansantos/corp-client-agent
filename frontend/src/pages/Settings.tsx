@@ -97,6 +97,8 @@ export default function Settings() {
   const [showNewDomain, setShowNewDomain]   = useState(false);
   const [newDomainName, setNewDomainName]   = useState("");
   const [newDomainError, setNewDomainError] = useState("");
+  const [creatingDomain, setCreatingDomain] = useState(false);
+  const [deletingDomain, setDeletingDomain] = useState<string | null>(null);
 
   // Saving per env
   const [saving, setSaving]   = useState<Record<string, boolean>>({});
@@ -296,7 +298,7 @@ export default function Settings() {
     });
   }
 
-  function handleAddDomain() {
+  async function handleAddDomain() {
     const name = newDomainName.trim().toLowerCase();
     if (!DOMAIN_RE.test(name)) {
       setNewDomainError("Use apenas letras minúsculas, números e hífens (sem hífens no início/fim).");
@@ -305,6 +307,16 @@ export default function Settings() {
     if (domains.some((d) => d.domain === name)) {
       setNewDomainError("Domínio já existe.");
       return;
+    }
+    setCreatingDomain(true);
+    try {
+      await api.post(`/settings/domains/${encodeURIComponent(name)}`);
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Erro ao criar domínio.";
+      setNewDomainError(detail);
+      return;
+    } finally {
+      setCreatingDomain(false);
     }
     setDomains((prev) => [...prev, { domain: name, envs: ENVS.map(EMPTY_DOMAIN_ENV) }]);
     setExpanded((prev) => new Set([...prev, name]));
@@ -315,6 +327,7 @@ export default function Settings() {
 
   async function handleDeleteDomain(domain: string) {
     if (!confirm(`Remover domínio "${domain}" e todas suas configurações?`)) return;
+    setDeletingDomain(domain);
     try {
       await api.delete(`/settings/domains/${encodeURIComponent(domain)}`);
       setDomains((prev) => prev.filter((d) => d.domain !== domain));
@@ -322,6 +335,8 @@ export default function Settings() {
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? "Erro ao remover domínio.";
       alert(detail);
+    } finally {
+      setDeletingDomain(null);
     }
   }
 
@@ -403,8 +418,10 @@ export default function Settings() {
                 onChange={(e) => { setNewDomainName(e.target.value.toLowerCase()); setNewDomainError(""); }}
                 onKeyDown={(e) => { if (e.key === "Enter") handleAddDomain(); if (e.key === "Escape") setShowNewDomain(false); }}
               />
-              <button className="st-save-btn" type="button" onClick={handleAddDomain}>Adicionar</button>
-              <button className="st-refresh-btn" type="button" onClick={() => setShowNewDomain(false)}>Cancelar</button>
+              <button className="st-save-btn" type="button" onClick={handleAddDomain} disabled={creatingDomain}>
+                {creatingDomain ? "Criando..." : "Adicionar"}
+              </button>
+              <button className="st-refresh-btn" type="button" onClick={() => setShowNewDomain(false)} disabled={creatingDomain}>Cancelar</button>
               {newDomainError && <span className="st-save-error">{newDomainError}</span>}
             </div>
           )}
@@ -463,9 +480,10 @@ export default function Settings() {
                       className="st-delete-btn"
                       type="button"
                       title="Remover domínio"
+                      disabled={deletingDomain === d.domain}
                       onClick={(e) => { e.stopPropagation(); handleDeleteDomain(d.domain); }}
                     >
-                      ✕
+                      {deletingDomain === d.domain ? "..." : "✕"}
                     </button>
                   </button>
 

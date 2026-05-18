@@ -95,18 +95,93 @@ def execute_one(sql: str, params: tuple = ()) -> dict | None:
     return rows[0] if rows else None
 
 
+def create_domain_schema(domain: str) -> None:
+    """Create PostgreSQL schema + tables for a new domain (idempotent)."""
+    idx = domain.replace("-", "_")
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{domain}"')
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS "{domain}".tools_config (
+                    tool_name    TEXT        NOT NULL PRIMARY KEY,
+                    kind         TEXT        NOT NULL,
+                    ref          TEXT        NOT NULL,
+                    description  TEXT,
+                    owner        TEXT,
+                    environment  TEXT        NOT NULL DEFAULT 'dev',
+                    status       TEXT        NOT NULL DEFAULT 'active',
+                    created_at   TIMESTAMPTZ DEFAULT NOW(),
+                    created_by   TEXT,
+                    approved_by  TEXT,
+                    approved_at  TIMESTAMPTZ
+                )
+            """)
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS "{domain}".agents_config (
+                    agent_id              TEXT             NOT NULL PRIMARY KEY,
+                    name                  TEXT             NOT NULL,
+                    description           TEXT,
+                    model                 TEXT,
+                    tools_enabled         TEXT[],
+                    status                TEXT             NOT NULL DEFAULT 'active',
+                    environment           TEXT             NOT NULL DEFAULT 'dev',
+                    runtime_mode          TEXT,
+                    eval_profile          TEXT,
+                    min_safety_score      DOUBLE PRECISION,
+                    min_correctness_score DOUBLE PRECISION,
+                    created_at            TIMESTAMPTZ      DEFAULT NOW(),
+                    created_by            TEXT,
+                    updated_at            TIMESTAMPTZ      DEFAULT NOW(),
+                    serving_endpoint_name TEXT,
+                    agent_type            TEXT,
+                    owner_principal       TEXT,
+                    instructions          TEXT,
+                    approval_requested    BOOLEAN          DEFAULT FALSE,
+                    mlflow_experiment_id  TEXT,
+                    mlflow_url            TEXT,
+                    eval_run_id           TEXT,
+                    eval_status           TEXT
+                )
+            """)
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS "{domain}".eval_datasets (
+                    id                TEXT        NOT NULL PRIMARY KEY,
+                    agent_id          TEXT        NOT NULL
+                                      REFERENCES "{domain}".agents_config(agent_id) ON DELETE CASCADE,
+                    request           TEXT        NOT NULL,
+                    expected_response TEXT        NOT NULL,
+                    created_at        TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS "idx_eval_{idx}_agent_id"
+                ON "{domain}".eval_datasets(agent_id)
+            """)
+        conn.commit()
+
+
+def list_domain_schemas() -> list[str]:
+    """Return all domain names from app.domain_envs."""
+    rows = execute("SELECT DISTINCT domain FROM app.domain_envs ORDER BY domain")
+    return [r["domain"] for r in rows]
+
+
 def ensure_schema() -> None:
     """Idempotent schema migrations — run once at startup."""
+    execute("CREATE SCHEMA IF NOT EXISTS app")
     execute("""
-        ALTER TABLE IF EXISTS tools_config
-            ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'default'
+        CREATE TABLE IF NOT EXISTS app.domain_envs (
+            domain        TEXT        NOT NULL,
+            env           TEXT        NOT NULL,
+            workspace_url TEXT,
+            token         TEXT,
+            notes         TEXT,
+            updated_at    TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (domain, env)
+        )
     """)
     execute("""
-        ALTER TABLE IF EXISTS agents_config
-            ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'default'
-    """)
-    execute("""
-        CREATE TABLE IF NOT EXISTS domain_model_approvals (
+        CREATE TABLE IF NOT EXISTS app.domain_model_approvals (
             domain      TEXT NOT NULL,
             model_name  TEXT NOT NULL,
             status      TEXT NOT NULL DEFAULT 'pending',

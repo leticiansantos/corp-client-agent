@@ -1,7 +1,8 @@
 """
 Agents registry API.
 
-agents_config and eval_datasets live in a single Lakebase (PostgreSQL) database.
+agents_config and eval_datasets live in per-domain PostgreSQL schemas
+("{domain}".agents_config, "{domain}".eval_datasets).
 The `environment` column (dev / staging / prod) is a lifecycle flag — promotion is an
 UPDATE, not a record copy. Workspace API calls (MLflow, serving endpoints) still go to
 each env's workspace.
@@ -50,20 +51,41 @@ _ENV_FRAMEWORK_ENDPOINT = {
 
 # ── Internal helpers ──────────────────────────────────────────
 
-def _find_agent(agent_id: str) -> dict | None:
-    """Return the agent row from Lakebase, or None if not found."""
-    return lakebase.execute_one(
-        "SELECT * FROM agents_config WHERE agent_id = %s", (agent_id,)
+def _find_agent_domain(agent_id: str) -> str | None:
+    """Search all domain schemas for agent_id; return its domain or None."""
+    for domain in lakebase.list_domain_schemas():
+        row = lakebase.execute_one(
+            f'SELECT agent_id FROM "{domain}".agents_config WHERE agent_id = %s',
+            (agent_id,),
+        )
+        if row:
+            return domain
+    return None
+
+
+def _find_agent(agent_id: str, domain: str | None = None) -> dict | None:
+    """Return the agent row from the domain schema, or None if not found."""
+    d = domain or _find_agent_domain(agent_id)
+    if d is None:
+        return None
+    row = lakebase.execute_one(
+        f'SELECT * FROM "{d}".agents_config WHERE agent_id = %s', (agent_id,)
     )
+    if row is not None:
+        row["domain"] = d
+    return row
 
 
-def _row_to_api(row: dict) -> dict:
+def _row_to_api(row: dict, domain: str | None = None) -> dict:
     """Normalize a Lakebase row for the API: map name→agent_name, compute virtual status."""
     row = dict(row)
     row["agent_name"] = row.pop("name", "") or ""
     # tools_enabled is TEXT[] → already a Python list from psycopg3
     if row.get("tools_enabled") is None:
         row["tools_enabled"] = []
+    # Inject domain if not already in row
+    if domain and "domain" not in row:
+        row["domain"] = domain
     # Map environment to virtual status; keep 'disabled' as-is
     if row.get("status") != "disabled":
         env = row.get("environment", "dev")
@@ -81,32 +103,28 @@ def list_agents(
     env: str | None = Query(default=None),
     domain: str | None = Query(default=None),
 ):
-    """Return agents, optionally filtered by environment and/or domain."""
-    conditions = []
-    params: list = []
-    if env and env in ENVS:
-        conditions.append("environment = %s")
-        params.append(env)
-    if domain:
-        conditions.append("domain = %s")
-        params.append(domain)
-
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    rows = lakebase.execute(
-        f"""
-        SELECT agent_id, name, agent_type, owner_principal, description, instructions,
+    """Return agents from domain schema(s), optionally filtered by environment."""
+    cols = """agent_id, name, agent_type, owner_principal, description, instructions,
                tools_enabled, model, serving_endpoint_name, eval_profile,
                min_safety_score, min_correctness_score, environment, status,
                runtime_mode, approval_requested, mlflow_experiment_id, mlflow_url,
-               eval_run_id, eval_status, created_at, updated_at, domain
-        FROM agents_config
-        {where}
-        ORDER BY
-            CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
-            created_at DESC
-        """,
-        tuple(params),
-    )
+               eval_run_id, eval_status, created_at, updated_at"""
+    order = "ORDER BY CASE environment WHEN 'prod' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END, created_at DESC"
+
+    env_filter = " AND environment = %s" if (env and env in ENVS) else ""
+    env_params = (env,) if (env and env in ENVS) else ()
+
+    domains = [domain] if domain else lakebase.list_domain_schemas()
+    rows: list[dict] = []
+    for d in domains:
+        d_rows = lakebase.execute(
+            f'SELECT {cols} FROM "{d}".agents_config WHERE 1=1{env_filter} {order}',
+            env_params,
+        )
+        for r in d_rows:
+            r["domain"] = d
+        rows.extend(d_rows)
+
     return {"agents": [_row_to_api(r) for r in rows]}
 
 
@@ -130,23 +148,22 @@ class RegisterAgentRequest(BaseModel):
 
 @router.post("/agents", status_code=status.HTTP_201_CREATED)
 def register_agent(body: RegisterAgentRequest):
-    """Register a new agent in Lakebase with environment='dev'."""
+    """Register a new agent in the domain's Lakebase schema with environment='dev'."""
     lakebase.execute(
-        """
-        INSERT INTO agents_config (
-            agent_id, name, domain, agent_type, owner_principal, description, instructions,
+        f"""
+        INSERT INTO "{body.domain}".agents_config (
+            agent_id, name, agent_type, owner_principal, description, instructions,
             tools_enabled, model, serving_endpoint_name, eval_profile,
             min_safety_score, min_correctness_score,
             environment, status, runtime_mode, created_at, created_by, updated_at
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s,
             %s, %s,
             'dev', 'active', %s, NOW(), %s, NOW()
         )
         ON CONFLICT (agent_id) DO UPDATE SET
             name                  = EXCLUDED.name,
-            domain                = EXCLUDED.domain,
             agent_type            = EXCLUDED.agent_type,
             owner_principal       = EXCLUDED.owner_principal,
             description           = EXCLUDED.description,
@@ -162,7 +179,7 @@ def register_agent(body: RegisterAgentRequest):
             updated_at            = NOW()
         """,
         (
-            body.agent_id, body.agent_name, body.domain, body.agent_type, body.owner_principal,
+            body.agent_id, body.agent_name, body.agent_type, body.owner_principal,
             body.description, body.instructions,
             body.tools_enabled, body.model, _FRAMEWORK_ENDPOINT, body.eval_profile,
             body.min_safety_score, body.min_correctness_score,
@@ -190,11 +207,12 @@ class UpdateAgentRequest(BaseModel):
 
 
 @router.put("/agents/{agent_id}")
-def update_agent(agent_id: str, body: UpdateAgentRequest):
+def update_agent(agent_id: str, body: UpdateAgentRequest, domain: str | None = Query(default=None)):
     """Update an existing agent in Lakebase."""
-    agent = _find_agent(agent_id)
+    agent = _find_agent(agent_id, domain)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    d = agent["domain"]
 
     field_map = [
         ("agent_name",            "name"),
@@ -223,7 +241,7 @@ def update_agent(agent_id: str, body: UpdateAgentRequest):
     set_clauses.append("updated_at = NOW()")
     params.append(agent_id)
     lakebase.execute(
-        f"UPDATE agents_config SET {', '.join(set_clauses)} WHERE agent_id = %s",
+        f'UPDATE "{d}".agents_config SET {", ".join(set_clauses)} WHERE agent_id = %s',
         tuple(params),
     )
     return {"agent_id": agent_id, "environment": agent.get("environment", "dev")}
@@ -236,14 +254,15 @@ class UpdateStatusRequest(BaseModel):
 
 
 @router.patch("/agents/{agent_id}/status")
-def update_agent_status(agent_id: str, body: UpdateStatusRequest):
+def update_agent_status(agent_id: str, body: UpdateStatusRequest, domain: str | None = Query(default=None)):
     if body.new_status not in VALID_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status inválido: '{body.new_status}'.")
-    agent = _find_agent(agent_id)
+    agent = _find_agent(agent_id, domain)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    d = agent["domain"]
     lakebase.execute(
-        "UPDATE agents_config SET status = %s, updated_at = NOW() WHERE agent_id = %s",
+        f'UPDATE "{d}".agents_config SET status = %s, updated_at = NOW() WHERE agent_id = %s',
         (body.new_status, agent_id),
     )
     return {"agent_id": agent_id, "new_status": body.new_status, "environment": agent.get("environment", "dev")}
@@ -252,11 +271,12 @@ def update_agent_status(agent_id: str, body: UpdateStatusRequest):
 # ── Promote agent ─────────────────────────────────────────────
 
 @router.post("/agents/{agent_id}/promote")
-def promote_agent(agent_id: str):
+def promote_agent(agent_id: str, domain: str | None = Query(default=None)):
     """Promote agent to the next environment (dev→staging or staging→prod)."""
-    agent = _find_agent(agent_id)
+    agent = _find_agent(agent_id, domain)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    d = agent["domain"]
 
     env_src  = agent.get("environment") or "dev"
     next_env = _ENV_NEXT.get(env_src)
@@ -321,8 +341,8 @@ def promote_agent(agent_id: str):
 
     # ── 2. Update agent environment flag in Lakebase ──────────────
     lakebase.execute(
-        """
-        UPDATE agents_config
+        f"""
+        UPDATE "{d}".agents_config
         SET environment          = %s,
             serving_endpoint_name = %s,
             mlflow_experiment_id  = COALESCE(%s, mlflow_experiment_id),
@@ -342,7 +362,7 @@ def promote_agent(agent_id: str):
         for tool_name in tools_enabled:
             try:
                 tool = lakebase.execute_one(
-                    "SELECT tool_name, kind, ref FROM tools_config WHERE tool_name = %s",
+                    f'SELECT tool_name, kind, ref FROM "{d}".tools_config WHERE tool_name = %s',
                     (tool_name,),
                 )
                 if tool is None:
@@ -363,7 +383,7 @@ def promote_agent(agent_id: str):
                         print(f"[Promote] Genie space para tool '{tool_name}' falhou: {exc.detail}", file=sys.stderr)
                         continue
                 lakebase.execute(
-                    "UPDATE tools_config SET environment = %s, ref = %s, status = 'active', approved_at = NOW() WHERE tool_name = %s",
+                    f'UPDATE "{d}".tools_config SET environment = %s, ref = %s, status = \'active\', approved_at = NOW() WHERE tool_name = %s',
                     (next_env, new_ref, tool_name),
                 )
             except Exception:
@@ -380,28 +400,30 @@ def promote_agent(agent_id: str):
 # ── Approval workflow ─────────────────────────────────────────
 
 @router.post("/agents/{agent_id}/request-approval")
-def request_approval(agent_id: str):
+def request_approval(agent_id: str, domain: str | None = Query(default=None)):
     """Mark an agent as pending approval review (dev only)."""
-    agent = _find_agent(agent_id)
+    agent = _find_agent(agent_id, domain)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
     if agent.get("environment") != "dev":
         raise HTTPException(status_code=400, detail="Apenas agentes dev podem solicitar aprovação.")
+    d = agent["domain"]
     lakebase.execute(
-        "UPDATE agents_config SET approval_requested = TRUE, updated_at = NOW() WHERE agent_id = %s",
+        f'UPDATE "{d}".agents_config SET approval_requested = TRUE, updated_at = NOW() WHERE agent_id = %s',
         (agent_id,),
     )
     return {"agent_id": agent_id, "approval_requested": True}
 
 
 @router.post("/agents/{agent_id}/reject-approval")
-def reject_approval(agent_id: str):
+def reject_approval(agent_id: str, domain: str | None = Query(default=None)):
     """Reject an approval request, returning agent to draft state."""
-    agent = _find_agent(agent_id)
+    agent = _find_agent(agent_id, domain)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    d = agent["domain"]
     lakebase.execute(
-        "UPDATE agents_config SET approval_requested = FALSE, updated_at = NOW() WHERE agent_id = %s",
+        f'UPDATE "{d}".agents_config SET approval_requested = FALSE, updated_at = NOW() WHERE agent_id = %s',
         (agent_id,),
     )
     return {"agent_id": agent_id, "approval_requested": False}
@@ -409,7 +431,7 @@ def reject_approval(agent_id: str):
 
 # ── Run eval ──────────────────────────────────────────────────
 
-def _run_eval_task(agent_id: str, staging_cfg: dict) -> None:
+def _run_eval_task(agent_id: str, staging_cfg: dict, domain: str) -> None:
     """Background task: run mlflow.genai.evaluate() against the staging endpoint."""
     import os
     import mlflow
@@ -419,7 +441,7 @@ def _run_eval_task(agent_id: str, staging_cfg: dict) -> None:
 
     try:
         agent = lakebase.execute_one(
-            "SELECT serving_endpoint_name, mlflow_experiment_id FROM agents_config WHERE agent_id = %s",
+            f'SELECT serving_endpoint_name, mlflow_experiment_id FROM "{domain}".agents_config WHERE agent_id = %s',
             (agent_id,),
         )
         if not agent:
@@ -432,7 +454,7 @@ def _run_eval_task(agent_id: str, staging_cfg: dict) -> None:
             raise ValueError("mlflow_experiment_id ausente.")
 
         entries = lakebase.execute(
-            "SELECT request, expected_response FROM eval_datasets WHERE agent_id = %s ORDER BY created_at",
+            f'SELECT request, expected_response FROM "{domain}".eval_datasets WHERE agent_id = %s ORDER BY created_at',
             (agent_id,),
         )
         if not entries:
@@ -508,7 +530,7 @@ def _run_eval_task(agent_id: str, staging_cfg: dict) -> None:
                     os.environ.pop(k, None)
 
         lakebase.execute(
-            "UPDATE agents_config SET eval_status = 'completed', eval_run_id = %s, updated_at = NOW() WHERE agent_id = %s",
+            f'UPDATE "{domain}".agents_config SET eval_status = \'completed\', eval_run_id = %s, updated_at = NOW() WHERE agent_id = %s',
             (run_id, agent_id),
         )
 
@@ -516,7 +538,7 @@ def _run_eval_task(agent_id: str, staging_cfg: dict) -> None:
         print(f"[Eval] Falha: {exc}", file=sys.stderr)
         try:
             lakebase.execute(
-                "UPDATE agents_config SET eval_status = 'failed', updated_at = NOW() WHERE agent_id = %s",
+                f'UPDATE "{domain}".agents_config SET eval_status = \'failed\', updated_at = NOW() WHERE agent_id = %s',
                 (agent_id,),
             )
         except Exception:
@@ -524,13 +546,14 @@ def _run_eval_task(agent_id: str, staging_cfg: dict) -> None:
 
 
 @router.post("/agents/{agent_id}/run-eval")
-def run_eval(agent_id: str, background_tasks: BackgroundTasks):
+def run_eval(agent_id: str, background_tasks: BackgroundTasks, domain: str | None = Query(default=None)):
     """Trigger async evaluation run for a staging agent."""
-    agent = _find_agent(agent_id)
+    agent = _find_agent(agent_id, domain)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
     if agent.get("environment") != "staging":
         raise HTTPException(status_code=400, detail="Avaliação só pode ser disparada para agentes no staging.")
+    d = agent["domain"]
 
     staging_parts = _env_client("staging")
     if staging_parts is None:
@@ -539,10 +562,10 @@ def run_eval(agent_id: str, background_tasks: BackgroundTasks):
     staging_cfg = {**_get_env_config("staging"), "catalog": s_catalog, "schema_name": s_schema, "warehouse_id": s_wh}
 
     lakebase.execute(
-        "UPDATE agents_config SET eval_status = 'running', eval_run_id = NULL, updated_at = NOW() WHERE agent_id = %s",
+        f'UPDATE "{d}".agents_config SET eval_status = \'running\', eval_run_id = NULL, updated_at = NOW() WHERE agent_id = %s',
         (agent_id,),
     )
-    background_tasks.add_task(_run_eval_task, agent_id, staging_cfg)
+    background_tasks.add_task(_run_eval_task, agent_id, staging_cfg, d)
     return {"agent_id": agent_id, "eval_status": "running"}
 
 
@@ -558,9 +581,9 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/agents/{agent_id}/chat")
-def chat_with_agent(agent_id: str, body: ChatRequest):
+def chat_with_agent(agent_id: str, body: ChatRequest, domain: str | None = Query(default=None)):
     """Send messages to the corp-agent-framework serving endpoint for this agent."""
-    agent = _find_agent(agent_id)
+    agent = _find_agent(agent_id, domain)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
 
@@ -617,37 +640,49 @@ class EvalEntryBody(BaseModel):
 
 
 @router.get("/agents/{agent_id}/eval-dataset")
-def list_eval_dataset(agent_id: str):
+def list_eval_dataset(agent_id: str, domain: str | None = Query(default=None)):
+    d = domain or _find_agent_domain(agent_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
     rows = lakebase.execute(
-        "SELECT id, agent_id, request, expected_response, created_at FROM eval_datasets WHERE agent_id = %s ORDER BY created_at",
+        f'SELECT id, agent_id, request, expected_response, created_at FROM "{d}".eval_datasets WHERE agent_id = %s ORDER BY created_at',
         (agent_id,),
     )
     return {"entries": rows}
 
 
 @router.post("/agents/{agent_id}/eval-dataset", status_code=status.HTTP_201_CREATED)
-def add_eval_entry(agent_id: str, body: EvalEntryBody):
+def add_eval_entry(agent_id: str, body: EvalEntryBody, domain: str | None = Query(default=None)):
+    d = domain or _find_agent_domain(agent_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
     entry_id = str(_uuid.uuid4())
     lakebase.execute(
-        "INSERT INTO eval_datasets (id, agent_id, request, expected_response, created_at) VALUES (%s, %s, %s, %s, NOW())",
+        f'INSERT INTO "{d}".eval_datasets (id, agent_id, request, expected_response, created_at) VALUES (%s, %s, %s, %s, NOW())',
         (entry_id, agent_id, body.request, body.expected_response),
     )
     return {"id": entry_id, "agent_id": agent_id, "request": body.request, "expected_response": body.expected_response}
 
 
 @router.put("/agents/{agent_id}/eval-dataset/{entry_id}")
-def update_eval_entry(agent_id: str, entry_id: str, body: EvalEntryBody):
+def update_eval_entry(agent_id: str, entry_id: str, body: EvalEntryBody, domain: str | None = Query(default=None)):
+    d = domain or _find_agent_domain(agent_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
     lakebase.execute(
-        "UPDATE eval_datasets SET request = %s, expected_response = %s WHERE id = %s AND agent_id = %s",
+        f'UPDATE "{d}".eval_datasets SET request = %s, expected_response = %s WHERE id = %s AND agent_id = %s',
         (body.request, body.expected_response, entry_id, agent_id),
     )
     return {"id": entry_id, "agent_id": agent_id}
 
 
 @router.delete("/agents/{agent_id}/eval-dataset/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_eval_entry(agent_id: str, entry_id: str):
+def delete_eval_entry(agent_id: str, entry_id: str, domain: str | None = Query(default=None)):
+    d = domain or _find_agent_domain(agent_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
     lakebase.execute(
-        "DELETE FROM eval_datasets WHERE id = %s AND agent_id = %s",
+        f'DELETE FROM "{d}".eval_datasets WHERE id = %s AND agent_id = %s',
         (entry_id, agent_id),
     )
 
@@ -655,10 +690,11 @@ def delete_eval_entry(agent_id: str, entry_id: str):
 # ── Delete agent ──────────────────────────────────────────────
 
 @router.delete("/agents/{agent_id}")
-def delete_agent(agent_id: str):
-    agent = _find_agent(agent_id)
+def delete_agent(agent_id: str, domain: str | None = Query(default=None)):
+    agent = _find_agent(agent_id, domain)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
+    d = agent["domain"]
     # eval_datasets cascade-deletes via FK
-    lakebase.execute("DELETE FROM agents_config WHERE agent_id = %s", (agent_id,))
+    lakebase.execute(f'DELETE FROM "{d}".agents_config WHERE agent_id = %s', (agent_id,))
     return {"deleted": agent_id, "environment": agent.get("environment", "dev")}

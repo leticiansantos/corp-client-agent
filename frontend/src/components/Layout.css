@@ -80,6 +80,80 @@
   gap: 12px;
 }
 
+/* ── Admin mode indicator ──────────────────────────────────── */
+.navbar-admin {
+  border-bottom-color: #FF5F1F;
+  box-shadow: 0 1px 0 #FFD4B8;
+}
+
+.navbar-link-admin {
+  color: #C2410C !important;
+}
+
+.navbar-link-admin.active {
+  color: #C2410C !important;
+  background: #FFF7ED;
+}
+
+.navbar-link-admin:hover {
+  color: #9A3412 !important;
+  background: #FFF7ED;
+}
+
+/* ── Admin toggle button ────────────────────────────────────── */
+.navbar-admin-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 2px;
+}
+
+.navbar-admin-toggle-track {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+  background: #D1D5DB;
+  border-radius: 9px;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.navbar-admin-toggle.is-admin .navbar-admin-toggle-track {
+  background: #FF5F1F;
+}
+
+.navbar-admin-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.18);
+  transition: transform 0.2s;
+}
+
+.navbar-admin-toggle.is-admin .navbar-admin-toggle-thumb {
+  transform: translateX(16px);
+}
+
+.navbar-admin-toggle-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #6B7280;
+  transition: color 0.2s;
+  user-select: none;
+}
+
+.navbar-admin-toggle.is-admin .navbar-admin-toggle-label {
+  color: #C2410C;
+}
+
 /* ── Domain selector in navbar ─────────────────────────────── */
 .navbar-domain-wrap {
   display: flex;

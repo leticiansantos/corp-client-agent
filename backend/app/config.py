@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     # Lakebase (PostgreSQL) — single DB for all environments
     lakebase_host: str = ""                          # LAKEBASE_HOST (endpoint DNS)
     lakebase_database: str = "databricks_postgres"   # LAKEBASE_DATABASE
-    lakebase_username: str = ""                      # LAKEBASE_USERNAME (Databricks user email)
-    lakebase_api: str = ""                           # LAKEBASE_API (Data API endpoint URL, optional)
+    lakebase_api: str = ""                           # LAKEBASE_API (PostgREST endpoint URL, optional)
+    # Note: username is derived automatically from the OAuth token (JWT 'sub' claim)
 
     # Set to true when running locally to skip WHL rebuild if already in Volume
     local_dev: bool = False

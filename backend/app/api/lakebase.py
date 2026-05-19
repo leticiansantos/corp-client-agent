@@ -20,22 +20,7 @@ _token_expiry: float = 0.0
 def _refresh_token() -> None:
     global _token, _token_expiry
 
-    # Local dev: get user token via Databricks CLI (user owns the Lakebase instance)
-    if settings.local_dev:
-        result = subprocess.run(
-            ["databricks", "auth", "token", "--output", "json",
-             "--host", settings.databricks_host],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"databricks auth token failed: {result.stderr}")
-        import json
-        data = json.loads(result.stdout)
-        _token = data["access_token"]
-        _token_expiry = time.time() + data.get("expires_in", 3600) - 300
-        return
-
-    # Deployed app: OAuth M2M (service principal must be granted access to Lakebase)
+    # Priority 1: OAuth M2M via service principal (works locally and deployed)
     if settings.databricks_client_id and settings.databricks_client_secret:
         host = settings.databricks_host.rstrip("/")
         resp = requests.post(
@@ -54,7 +39,22 @@ def _refresh_token() -> None:
         _token_expiry = time.time() + data.get("expires_in", 3600) - 300
         return
 
-    # PAT fallback
+    # Priority 2: Databricks CLI (local dev with personal user account)
+    if settings.local_dev:
+        result = subprocess.run(
+            ["databricks", "auth", "token", "--output", "json",
+             "--host", settings.databricks_host],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"databricks auth token failed: {result.stderr}")
+        import json
+        data = json.loads(result.stdout)
+        _token = data["access_token"]
+        _token_expiry = time.time() + data.get("expires_in", 3600) - 300
+        return
+
+    # Priority 3: PAT fallback
     if settings.databricks_token:
         _token = settings.databricks_token
         _token_expiry = time.time() + 86400
@@ -73,7 +73,7 @@ def get_connection() -> psycopg.Connection:
     return psycopg.connect(
         host=settings.lakebase_host,
         dbname=settings.lakebase_database,
-        user=settings.lakebase_username,
+        user=settings.databricks_client_id,
         password=_ensure_token(),
         sslmode="require",
         row_factory=dict_row,

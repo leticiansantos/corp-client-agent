@@ -32,7 +32,7 @@ ENVS = ("dev", "staging", "prod")
 
 ENDPOINT_NAME_TPL        = "corp-config-driven-agent-{env}"
 DOMAIN_ENDPOINT_NAME_TPL = "corp-config-driven-agent-{domain}-{env}"
-_CORP_WHL_VERSION  = "0.3.13"
+_CORP_WHL_VERSION  = "0.3.14"
 _CORP_MODEL_SUFFIX = "corp_config_driven_agent"
 
 # In-process deploy tracking (survives server restart via jobs API check)
@@ -514,7 +514,7 @@ print("DEPLOY_DONE")
 def _generate_deploy_script_lakebase(
     catalog: str, schema: str, environment: str, domain: str,
     workspace_url: str = "", token: str = "",
-    lakebase_host: str = "", lakebase_database: str = "", lakebase_username: str = "",
+    lakebase_host: str = "", lakebase_database: str = "",
     lakebase_databricks_host: str = "",
     lakebase_client_id: str = "", lakebase_client_secret: str = "",
 ) -> str:
@@ -523,9 +523,9 @@ def _generate_deploy_script_lakebase(
     The serving endpoint reads agent/tool config from Lakebase (PostgreSQL),
     so no Delta catalog/schema/warehouse_id is needed at inference time.
 
-    LAKEBASE_CLIENT_* are credentials from the workspace where Lakebase is hosted
-    (fevm-leticia-santos-stable). They are separate from the domain workspace
-    credentials (DATABRICKS_*) and allow cross-workspace Lakebase authentication.
+    LAKEBASE_DATABRICKS_HOST is the stable workspace where Lakebase lives.
+    DATABRICKS_CLIENT_ID/SECRET are the service principal credentials for that workspace —
+    the SP UUID is also used as the PostgreSQL role name.
     """
     endpoint_name = DOMAIN_ENDPOINT_NAME_TPL.format(domain=domain, env=environment)
     model_name    = f"{catalog}.{schema}.{_CORP_MODEL_SUFFIX}_{environment}"
@@ -622,10 +622,10 @@ ep_config = EndpointCoreConfigInput(
                 # Lakebase (PostgreSQL) — central store for all environments
                 "LAKEBASE_HOST":              "{lakebase_host}",
                 "LAKEBASE_DATABASE":          "{lakebase_database}",
-                "LAKEBASE_USERNAME":          "{lakebase_username}",
-                # Lakebase auth credentials — from the workspace where Lakebase is hosted.
-                # Required when the serving endpoint runs in a different workspace than Lakebase.
-                # _pg.py uses these (LAKEBASE_CLIENT_*) before falling back to DATABRICKS_*.
+                # Lakebase auth — dedicated SP for the stable workspace where Lakebase lives.
+                # LAKEBASE_CLIENT_ID/SECRET are used only by _pg.py (not by WorkspaceClient),
+                # avoiding the Databricks SDK "multiple auth methods" conflict with DATABRICKS_TOKEN.
+                # LAKEBASE_CLIENT_ID is also used as the PostgreSQL role name (SP UUID).
                 "LAKEBASE_DATABRICKS_HOST":   "{lakebase_databricks_host}",
                 "LAKEBASE_CLIENT_ID":         "{lakebase_client_id}",
                 "LAKEBASE_CLIENT_SECRET":     "{lakebase_client_secret}",
@@ -1231,7 +1231,6 @@ def _deploy_domain_background(domain: str, env: str, env_cfg: dict) -> None:
             token=env_cfg.get("token", ""),
             lakebase_host=settings.lakebase_host,
             lakebase_database=settings.lakebase_database,
-            lakebase_username=settings.lakebase_username,
             lakebase_databricks_host=settings.databricks_host,
             lakebase_client_id=settings.databricks_client_id,
             lakebase_client_secret=settings.databricks_client_secret,
@@ -1302,10 +1301,10 @@ class SaveDomainEnvRequest(BaseModel):
 
 @router.get("/domains")
 def list_domains():
-    if not settings.lakebase_host or not settings.lakebase_username:
+    if not settings.lakebase_host or not settings.databricks_client_id:
         raise HTTPException(
             status_code=503,
-            detail="Lakebase não configurado. Defina LAKEBASE_HOST e LAKEBASE_USERNAME no .env.",
+            detail="Lakebase não configurado. Defina LAKEBASE_HOST e DATABRICKS_CLIENT_ID no .env.",
         )
     try:
         rows = _get_all_domain_envs()
@@ -1338,7 +1337,7 @@ def list_domains():
 def save_domain_env(domain: str, env: str, body: SaveDomainEnvRequest):
     if env not in ENVS:
         raise HTTPException(status_code=422, detail=f"Ambiente inválido: '{env}'")
-    if not settings.lakebase_host or not settings.lakebase_username:
+    if not settings.lakebase_host or not settings.databricks_client_id:
         raise HTTPException(status_code=503, detail="Lakebase não configurado.")
     from app.api import lakebase
     lakebase.execute("""
@@ -1364,7 +1363,7 @@ def create_domain(domain: str):
     import re
     if not re.fullmatch(r"[a-z0-9][a-z0-9\-]*[a-z0-9]|[a-z0-9]", domain):
         raise HTTPException(status_code=422, detail="Nome de domínio inválido.")
-    if not settings.lakebase_host or not settings.lakebase_username:
+    if not settings.lakebase_host or not settings.databricks_client_id:
         raise HTTPException(status_code=503, detail="Lakebase não configurado.")
     from app.api import lakebase
     # Create per-domain PostgreSQL schema (idempotent)

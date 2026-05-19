@@ -395,9 +395,10 @@
 }
 .ag-action-danger:hover:not(:disabled)  { background: #FECACA; }
 
-.ag-promote-msg { font-size: 0.82rem; font-weight: 500; }
-.ag-promote-ok  { color: #166534; }
-.ag-promote-err { color: #991B1B; }
+.ag-promote-msg  { font-size: 0.82rem; font-weight: 500; }
+.ag-promote-ok   { color: #166534; }
+.ag-promote-err  { color: #991B1B; }
+.ag-promote-step { color: #92400E; }
 
 .ag-no-actions { color: var(--color-text-muted); font-size: 0.82rem; }
 

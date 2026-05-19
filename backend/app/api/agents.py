@@ -20,6 +20,7 @@ from databricks.sdk.service.ml import ExperimentTag
 import time as _time
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api import lakebase
@@ -271,131 +272,151 @@ def update_agent_status(agent_id: str, body: UpdateStatusRequest, domain: str | 
 
 # ── Promote agent ─────────────────────────────────────────────
 
+def _sse(data: dict) -> str:
+    return f"data: {json.dumps(data)}\n\n"
+
+
 @router.post("/agents/{agent_id}/promote")
 def promote_agent(agent_id: str, domain: str | None = Query(default=None)):
-    """Promote agent to the next environment (dev→staging or staging→prod)."""
-    agent = _find_agent(agent_id, domain)
-    if agent is None:
-        raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
-    d = agent["domain"]
+    """Promote agent to the next environment (dev→staging or staging→prod). Streams SSE progress."""
 
-    env_src  = agent.get("environment") or "dev"
-    next_env = _ENV_NEXT.get(env_src)
-    if not next_env:
-        raise HTTPException(status_code=400, detail="Agente já está no ambiente prod.")
+    def generate():
+        agent = _find_agent(agent_id, domain)
+        if agent is None:
+            yield _sse({"error": f"Agente '{agent_id}' não encontrado."})
+            return
+        d = agent["domain"]
 
-    src_parts = _env_client(env_src)
-    dst_parts = _env_client(next_env)
-    if dst_parts is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Ambiente '{next_env}' não configurado em Settings.",
+        env_src  = agent.get("environment") or "dev"
+        next_env = _ENV_NEXT.get(env_src)
+        if not next_env:
+            yield _sse({"error": "Agente já está no ambiente prod."})
+            return
+
+        yield _sse({"step": f"Verificando configurações do ambiente {next_env}..."})
+        dst_row = lakebase.execute_one(
+            "SELECT workspace_url, token FROM app.domain_envs WHERE domain = %s AND env = %s",
+            (d, next_env),
         )
-    w_dst, catalog_dst, schema_dst, wh_dst = dst_parts
-    staging_host = (_get_env_config(next_env).get("workspace_url") or "").rstrip("/") if next_env == "staging" else ""
+        if not dst_row or not dst_row.get("workspace_url"):
+            yield _sse({"error": f"Ambiente '{next_env}' não configurado em domain_envs para domínio '{d}'."})
+            return
+        w_dst = _workspace_client_for_env(dst_row)
+        staging_host = dst_row["workspace_url"].rstrip("/") if next_env == "staging" else ""
+        catalog_dst = settings.framework_catalog
+        wh_dst = ""  # not stored in domain_envs; Genie promotion skipped if empty
 
-    # ── 1. Register MLflow experiment BEFORE writing to staging ──
-    mlflow_experiment_id: str | None = None
-    if next_env == "staging":
-        exp_name = f"/Framework Agents/{agent_id}"
-        print(f"[MLflow] Criando experimento '{exp_name}' no staging...", file=sys.stderr)
-        try:
+        # ── 1. Register MLflow experiment ─────────────────────────
+        mlflow_experiment_id: str | None = None
+        if next_env == "staging":
+            yield _sse({"step": "Criando experimento MLflow no staging..."})
+            exp_name = f"/Framework Agents/{agent_id}"
             try:
-                w_dst.workspace.mkdirs(path="/Framework Agents")
-            except Exception as mk_exc:
-                print(f"[MLflow] mkdirs aviso: {mk_exc}", file=sys.stderr)
-            try:
-                create_resp = w_dst.experiments.create_experiment(
-                    name=exp_name,
-                    tags=[ExperimentTag(key="mlflow.experimentType", value="GENAI_EXPERIMENT")],
-                )
-                mlflow_experiment_id = create_resp.experiment_id
-                print(f"[MLflow] Criado: experiment_id={mlflow_experiment_id}", file=sys.stderr)
-            except Exception as create_exc:
-                print(f"[MLflow] create_experiment falhou ({create_exc}), tentando get_by_name...", file=sys.stderr)
-                get_resp = w_dst.experiments.get_by_name(experiment_name=exp_name)
-                if get_resp and get_resp.experiment:
-                    mlflow_experiment_id = get_resp.experiment.experiment_id
-                    try:
-                        w_dst.experiments.set_experiment_tag(
-                            experiment_id=mlflow_experiment_id,
-                            key="mlflow.experimentType",
-                            value="GENAI_EXPERIMENT",
-                        )
-                    except Exception:
-                        pass
-                    print(f"[MLflow] Recuperado: experiment_id={mlflow_experiment_id}", file=sys.stderr)
-            if not mlflow_experiment_id:
-                raise ValueError("experiment_id não retornado após create/get_by_name.")
-        except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Falha ao registrar experimento MLflow no staging: {exc}",
+                try:
+                    w_dst.workspace.mkdirs(path="/Framework Agents")
+                except Exception:
+                    pass
+                try:
+                    create_resp = w_dst.experiments.create_experiment(
+                        name=exp_name,
+                        tags=[ExperimentTag(key="mlflow.experimentType", value="GENAI_EXPERIMENT")],
+                    )
+                    mlflow_experiment_id = create_resp.experiment_id
+                except Exception:
+                    get_resp = w_dst.experiments.get_by_name(experiment_name=exp_name)
+                    if get_resp and get_resp.experiment:
+                        mlflow_experiment_id = get_resp.experiment.experiment_id
+                        try:
+                            w_dst.experiments.set_experiment_tag(
+                                experiment_id=mlflow_experiment_id,
+                                key="mlflow.experimentType",
+                                value="GENAI_EXPERIMENT",
+                            )
+                        except Exception:
+                            pass
+                if not mlflow_experiment_id:
+                    raise ValueError("experiment_id não retornado após create/get_by_name.")
+            except Exception as exc:
+                yield _sse({"error": f"Falha ao registrar experimento MLflow: {exc}"})
+                return
+
+        mlflow_url_val = (
+            f"{staging_host}/ml/experiments/{mlflow_experiment_id}"
+            if mlflow_experiment_id and staging_host
+            else None
+        )
+        endpoint = _ENV_FRAMEWORK_ENDPOINT.get(next_env, _FRAMEWORK_ENDPOINT)
+
+        # ── 2. Promote agent record ────────────────────────────────
+        yield _sse({"step": "Promovendo agente..."})
+        lakebase.execute(
+            f"""
+            UPDATE "{d}".agents_config
+            SET environment           = %s,
+                serving_endpoint_name = %s,
+                mlflow_experiment_id  = COALESCE(%s, mlflow_experiment_id),
+                mlflow_url            = COALESCE(%s, mlflow_url),
+                approval_requested    = FALSE,
+                status                = 'active',
+                updated_at            = NOW()
+            WHERE agent_id = %s
+            """,
+            (next_env, endpoint, mlflow_experiment_id, mlflow_url_val, agent_id),
+        )
+
+        # ── 3. Promote tools ───────────────────────────────────────
+        tools_enabled: list[str] = agent.get("tools_enabled") or []
+        if tools_enabled:
+            yield _sse({"step": f"Promovendo {len(tools_enabled)} tool(s)..."})
+            src_row = lakebase.execute_one(
+                "SELECT workspace_url, token FROM app.domain_envs WHERE domain = %s AND env = %s",
+                (d, env_src),
             )
-
-    mlflow_url_val = (
-        f"{staging_host}/ml/experiments/{mlflow_experiment_id}"
-        if mlflow_experiment_id and staging_host
-        else None
-    )
-    endpoint = _ENV_FRAMEWORK_ENDPOINT.get(next_env, _FRAMEWORK_ENDPOINT)
-
-    # ── 2. Update agent environment flag in Lakebase ──────────────
-    lakebase.execute(
-        f"""
-        UPDATE "{d}".agents_config
-        SET environment          = %s,
-            serving_endpoint_name = %s,
-            mlflow_experiment_id  = COALESCE(%s, mlflow_experiment_id),
-            mlflow_url            = COALESCE(%s, mlflow_url),
-            approval_requested    = FALSE,
-            status                = 'active',
-            updated_at            = NOW()
-        WHERE agent_id = %s
-        """,
-        (next_env, endpoint, mlflow_experiment_id, mlflow_url_val, agent_id),
-    )
-
-    # ── 3. Update tools used by this agent to the target environment ──
-    tools_enabled: list[str] = agent.get("tools_enabled") or []
-    if tools_enabled and src_parts is not None:
-        w_src, catalog_src, schema_src, wh_src = src_parts
-        for tool_name in tools_enabled:
-            try:
-                tool = lakebase.execute_one(
-                    f'SELECT tool_name, kind, ref FROM "{d}".tools_config WHERE tool_name = %s',
-                    (tool_name,),
-                )
-                if tool is None:
-                    continue
-                new_ref = tool["ref"]
-                if tool.get("kind") == "mcp_genie":
-                    try:
-                        new_ref = _promote_genie_space(
-                            src_ref=tool["ref"],
-                            src_w=w_src,
-                            target_w=w_dst,
-                            src_catalog=catalog_src,
-                            target_catalog=catalog_dst,
-                            target_warehouse=wh_dst,
-                            target_host=staging_host,
-                        )
-                    except HTTPException as exc:
-                        print(f"[Promote] Genie space para tool '{tool_name}' falhou: {exc.detail}", file=sys.stderr)
+            w_src = _workspace_client_for_env(src_row) if src_row and src_row.get("workspace_url") else None
+            catalog_src = settings.framework_catalog
+            for i, tool_name in enumerate(tools_enabled, 1):
+                yield _sse({"step": f"Tool {i}/{len(tools_enabled)}: {tool_name}..."})
+                try:
+                    tool = lakebase.execute_one(
+                        f'SELECT tool_name, kind, ref FROM "{d}".tools_config WHERE tool_name = %s',
+                        (tool_name,),
+                    )
+                    if tool is None:
                         continue
-                lakebase.execute(
-                    f'UPDATE "{d}".tools_config SET environment = %s, ref = %s, status = \'active\', approved_at = NOW() WHERE tool_name = %s',
-                    (next_env, new_ref, tool_name),
-                )
-            except Exception:
-                pass  # non-critical
+                    new_ref = tool["ref"]
+                    if tool.get("kind") == "mcp_genie":
+                        if not w_src or not wh_dst:
+                            print(f"[Promote] Genie '{tool_name}' skipped: workspace or warehouse not configured.", file=sys.stderr)
+                            continue
+                        try:
+                            new_ref = _promote_genie_space(
+                                src_ref=tool["ref"],
+                                src_w=w_src,
+                                target_w=w_dst,
+                                src_catalog=catalog_src,
+                                target_catalog=catalog_dst,
+                                target_warehouse=wh_dst,
+                                target_host=staging_host,
+                            )
+                        except HTTPException as exc:
+                            print(f"[Promote] Genie space para tool '{tool_name}' falhou: {exc.detail}", file=sys.stderr)
+                            continue
+                    lakebase.execute(
+                        f'UPDATE "{d}".tools_config SET environment = %s, ref = %s, status = \'active\', approved_at = NOW() WHERE tool_name = %s',
+                        (next_env, new_ref, tool_name),
+                    )
+                except Exception:
+                    pass  # non-critical
 
-    return {
-        "agent_id": agent_id,
-        "promoted_to": next_env,
-        "tools_promoted": tools_enabled,
-        "mlflow_experiment_id": mlflow_experiment_id,
-    }
+        yield _sse({
+            "done": True,
+            "agent_id": agent_id,
+            "promoted_to": next_env,
+            "tools_promoted": tools_enabled,
+            "mlflow_experiment_id": mlflow_experiment_id,
+        })
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # ── Approval workflow ─────────────────────────────────────────

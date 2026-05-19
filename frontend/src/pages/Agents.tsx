@@ -423,19 +423,61 @@ export default function Agents() {
     }
   }
 
+  // ── Shared SSE promote stream ─────────────────────────────────
+  async function streamPromote(
+    agent_id: string,
+    onStep: (msg: string) => void,
+    onDone: (result: { promoted_to: string; mlflow_experiment_id?: string | null }) => void,
+    onError: (msg: string) => void,
+  ) {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agent_id)}/promote`, { method: "POST" });
+    if (!res.body) { onError("Sem resposta do servidor."); return; }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        try {
+          const evt = JSON.parse(line.slice(5).trim()) as {
+            step?: string; done?: boolean; error?: string;
+            promoted_to?: string; mlflow_experiment_id?: string | null;
+          };
+          if (evt.error) { onError(evt.error); return; }
+          if (evt.step)  { onStep(evt.step); }
+          if (evt.done)  { onDone({ promoted_to: evt.promoted_to ?? "", mlflow_experiment_id: evt.mlflow_experiment_id }); return; }
+        } catch { /* ignore malformed line */ }
+      }
+    }
+  }
+
   // ── Admin certification ───────────────────────────────────────
   async function handlePromote(agent_id: string, next: AgentStatus, action: "promote" | "disable") {
     setPromoting((p) => ({ ...p, [agent_id]: true }));
     setPromoteMsg((m) => ({ ...m, [agent_id]: "" }));
     try {
       if (action === "promote") {
-        await api.post(`/agents/${encodeURIComponent(agent_id)}/promote`);
+        await streamPromote(
+          agent_id,
+          (step) => setPromoteMsg((m) => ({ ...m, [agent_id]: step })),
+          ({ promoted_to }) => {
+            loadAgents();
+            setPromoteMsg((m) => ({ ...m, [agent_id]: `→ Promovido para ${promoted_to}` }));
+            setTimeout(() => setPromoteMsg((m) => ({ ...m, [agent_id]: "" })), 4000);
+          },
+          (err) => setPromoteMsg((m) => ({ ...m, [agent_id]: `Erro: ${err}` })),
+        );
       } else {
         await api.patch(`/agents/${encodeURIComponent(agent_id)}/status`, { new_status: "disabled" });
+        loadAgents();
+        setPromoteMsg((m) => ({ ...m, [agent_id]: `→ ${STATUS_LABELS[next]}` }));
+        setTimeout(() => setPromoteMsg((m) => ({ ...m, [agent_id]: "" })), 3000);
       }
-      loadAgents();
-      setPromoteMsg((m) => ({ ...m, [agent_id]: `→ ${STATUS_LABELS[next]}` }));
-      setTimeout(() => setPromoteMsg((m) => ({ ...m, [agent_id]: "" })), 3000);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
@@ -496,18 +538,23 @@ export default function Agents() {
     setReviewMsg((m) => ({ ...m, [agent_id]: "" }));
     try {
       if (action === "approve") {
-        const resp = await api.post<{ mlflow_experiment_id?: string | null }>(
-          `/agents/${encodeURIComponent(agent_id)}/promote`,
+        await streamPromote(
+          agent_id,
+          (step) => setReviewMsg((m) => ({ ...m, [agent_id]: step })),
+          ({ promoted_to, mlflow_experiment_id }) => {
+            loadAgents();
+            const expNote = mlflow_experiment_id ? ` (exp: ${mlflow_experiment_id})` : "";
+            setReviewMsg((m) => ({ ...m, [agent_id]: `→ Promovido para ${promoted_to}${expNote}` }));
+            setTimeout(() => setReviewMsg((m) => ({ ...m, [agent_id]: "" })), 6000);
+          },
+          (err) => setReviewMsg((m) => ({ ...m, [agent_id]: `Erro: ${err}` })),
         );
-        loadAgents();
-        const expNote = resp.data.mlflow_experiment_id ? ` (exp: ${resp.data.mlflow_experiment_id})` : "";
-        setReviewMsg((m) => ({ ...m, [agent_id]: `→ Promovido para Staging${expNote}` }));
       } else {
         await api.post(`/agents/${encodeURIComponent(agent_id)}/reject-approval`);
         loadAgents();
         setReviewMsg((m) => ({ ...m, [agent_id]: "Solicitação rejeitada" }));
+        setTimeout(() => setReviewMsg((m) => ({ ...m, [agent_id]: "" })), 6000);
       }
-      setTimeout(() => setReviewMsg((m) => ({ ...m, [agent_id]: "" })), 6000);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
@@ -817,7 +864,9 @@ export default function Agents() {
                           </td>
                           <td className="ag-col-owner">{a.owner_principal}</td>
                           <td className="ag-col-actions">
-                            {reviewMsg[a.agent_id] ? (
+                            {reviewingApproval[a.agent_id] && reviewMsg[a.agent_id] ? (
+                              <span className="ag-promote-msg ag-promote-step">⏳ {reviewMsg[a.agent_id]}</span>
+                            ) : reviewMsg[a.agent_id] ? (
                               <span className={reviewMsg[a.agent_id].startsWith("Erro") ? "ag-promote-msg ag-promote-err" : "ag-promote-msg ag-promote-ok"}>
                                 {reviewMsg[a.agent_id]}
                               </span>
@@ -927,7 +976,9 @@ export default function Agents() {
                                   </button>
                                 )}
                                 {/* Promote button */}
-                                {promoteMsg[a.agent_id] ? (
+                                {promoting[a.agent_id] && promoteMsg[a.agent_id] ? (
+                                  <span className="ag-promote-msg ag-promote-step">⏳ {promoteMsg[a.agent_id]}</span>
+                                ) : promoteMsg[a.agent_id] ? (
                                   <span className={promoteMsg[a.agent_id].startsWith("Erro") ? "ag-promote-msg ag-promote-err" : "ag-promote-msg ag-promote-ok"}>
                                     {promoteMsg[a.agent_id]}
                                   </span>

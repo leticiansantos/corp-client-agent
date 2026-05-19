@@ -180,7 +180,10 @@ export default function Agents() {
 
   // Chat modal
   const [chatModal, setChatModal]         = useState<{ agent: Agent } | null>(null);
-  const [chatMessages, setChatMessages]   = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  type ChatEntry =
+    | { role: "user" | "assistant"; content: string }
+    | { role: "tool_call"; tool_name: string; tool_input: unknown };
+  const [chatMessages, setChatMessages]   = useState<ChatEntry[]>([]);
   const [chatInput, setChatInput]         = useState("");
   const [chatLoading, setChatLoading]     = useState(false);
   const [chatError, setChatError]         = useState("");
@@ -549,11 +552,21 @@ export default function Agents() {
     setChatLoading(true);
     setChatError("");
     try {
-      const res = await api.post<{ reply: string }>(
+      const res = await api.post<{ reply: string; tool_calls?: { name: string; input: unknown }[] }>(
         `/agents/${encodeURIComponent(chatModal.agent.agent_id)}/chat`,
-        { messages: newMessages },
+        { messages: newMessages.filter((m): m is { role: "user" | "assistant"; content: string } => m.role !== "tool_call") },
+        { params: { domain: chatModal.agent.domain } },
       );
-      setChatMessages((prev) => [...prev, { role: "assistant", content: res.data.reply }]);
+      const toolEntries: ChatEntry[] = (res.data.tool_calls ?? []).map((tc) => ({
+        role: "tool_call" as const,
+        tool_name: tc.name,
+        tool_input: tc.input,
+      }));
+      setChatMessages((prev) => [
+        ...prev,
+        ...toolEntries,
+        { role: "assistant", content: res.data.reply },
+      ]);
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
@@ -1420,9 +1433,7 @@ export default function Agents() {
                 <span className={`ag-env-badge env-${chatModal.agent.environment}`}>
                   {chatModal.agent.environment || "dev"}
                 </span>
-                {chatModal.agent.serving_endpoint_name && (
-                  <code className="ag-chat-model-label">{chatModal.agent.serving_endpoint_name}</code>
-                )}
+                <span className="ag-domain-badge">{chatModal.agent.domain}</span>
               </div>
               <button className="ag-modal-close" onClick={() => setChatModal(null)} aria-label="Fechar">×</button>
             </div>
@@ -1433,14 +1444,21 @@ export default function Agents() {
                   Envie uma mensagem para testar o agente
                 </div>
               )}
-              {chatMessages.map((msg, i) => (
-                <div key={i} className={`ag-chat-msg ag-chat-msg-${msg.role}`}>
-                  <span className="ag-chat-role-label">
-                    {msg.role === "user" ? "Você" : chatModal.agent.agent_name}
-                  </span>
-                  <div className="ag-chat-bubble">{msg.content}</div>
-                </div>
-              ))}
+              {chatMessages.map((msg, i) =>
+                msg.role === "tool_call" ? (
+                  <div key={i} className="ag-chat-tool-call">
+                    <span className="ag-chat-tool-icon">⚙</span>
+                    <span className="ag-chat-tool-name">{msg.tool_name}</span>
+                  </div>
+                ) : (
+                  <div key={i} className={`ag-chat-msg ag-chat-msg-${msg.role}`}>
+                    <span className="ag-chat-role-label">
+                      {msg.role === "user" ? "Você" : chatModal.agent.agent_name}
+                    </span>
+                    <div className="ag-chat-bubble">{msg.content}</div>
+                  </div>
+                )
+              )}
               {chatLoading && (
                 <div className="ag-chat-typing">
                   <span className="ag-chat-dots">•••</span>

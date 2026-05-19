@@ -1089,6 +1089,31 @@
   border-bottom-left-radius: 4px;
 }
 
+.ag-chat-tool-call {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #F0F9FF;
+  border: 1px solid #BAE6FD;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  color: #0369A1;
+  font-weight: 500;
+  max-width: 82%;
+}
+
+.ag-chat-tool-icon {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+.ag-chat-tool-name {
+  font-family: ui-monospace, monospace;
+  font-size: 0.73rem;
+}
+
 .ag-chat-typing {
   align-self: flex-start;
   padding: 10px 16px;

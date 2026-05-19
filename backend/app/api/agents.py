@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from app.api import lakebase
 from app.api.tools import _env_client, _get_env_config, _sql, _workspace_client_for_env, _promote_genie_space
+from app.api.settings import DOMAIN_ENDPOINT_NAME_TPL
 from app.config import settings
 
 router = APIRouter(prefix="/api")
@@ -587,22 +588,25 @@ def chat_with_agent(agent_id: str, body: ChatRequest, domain: str | None = Query
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado.")
 
-    endpoint = (agent.get("serving_endpoint_name") or "").strip()
-    if not endpoint:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Agente não está associado a nenhum serving endpoint. "
-                "O campo 'serving_endpoint_name' precisa ser preenchido após o deploy do "
-                "corp-agent-framework neste ambiente."
-            ),
-        )
+    d   = agent["domain"]
+    env = agent.get("environment") or "dev"
 
-    env   = agent.get("environment") or "dev"
-    parts = _env_client(env)
-    if parts is None:
-        raise HTTPException(status_code=503, detail=f"Ambiente '{env}' não configurado.")
-    w, _, _, _ = parts
+    # Always derive the endpoint from domain+env (matches what Settings deploys)
+    endpoint = DOMAIN_ENDPOINT_NAME_TPL.format(domain=d, env=env)
+
+    # Look up workspace credentials from Lakebase domain_envs (domain-specific workspace)
+    cfg = lakebase.execute_one(
+        "SELECT workspace_url, token FROM app.domain_envs WHERE domain = %s AND env = %s",
+        (d, env),
+    )
+    if cfg and cfg.get("workspace_url"):
+        w = _workspace_client_for_env({"workspace_url": cfg["workspace_url"], "token": cfg.get("token") or ""})
+    else:
+        # Fallback: read from old workspace_envs table (dev defaults)
+        parts = _env_client(env)
+        if parts is None:
+            raise HTTPException(status_code=503, detail=f"Ambiente '{env}' do domínio '{d}' não configurado em domain_envs.")
+        w, _, _, _ = parts
 
     messages = [{"role": m.role, "content": m.content} for m in body.messages]
     try:
@@ -617,19 +621,37 @@ def chat_with_agent(agent_id: str, body: ChatRequest, domain: str | None = Query
             detail=f"Erro ao chamar endpoint '{endpoint}': {exc}",
         ) from exc
 
-    choices = result.get("choices") or []
-    if choices:
-        content = (choices[0].get("message") or {}).get("content") or ""
-        if content:
-            return {"reply": content}
+    tool_calls: list[dict] = []
+    reply = ""
 
+    # Extract tool calls and final reply from output array (MLflow ResponsesAgent format)
     for item in (result.get("output") or []):
-        if isinstance(item, dict) and item.get("type") == "message":
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "tool_use":
+            tool_calls.append({"name": item.get("name", ""), "input": item.get("input", {})})
+        elif item.get("type") == "function_call":
+            tool_calls.append({"name": item.get("name", ""), "input": item.get("arguments", {})})
+        elif item.get("type") == "message":
             for c in (item.get("content") or []):
                 if isinstance(c, dict) and c.get("type") == "output_text":
-                    return {"reply": c.get("text", "")}
+                    reply = c.get("text", "")
 
-    return {"reply": str(result)}
+    if reply:
+        return {"reply": reply, "tool_calls": tool_calls}
+
+    # Fallback: OpenAI chat completions format
+    choices = result.get("choices") or []
+    if choices:
+        msg = choices[0].get("message") or {}
+        for tc in (msg.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            tool_calls.append({"name": fn.get("name", ""), "input": fn.get("arguments", {})})
+        content = msg.get("content") or ""
+        if content:
+            return {"reply": content, "tool_calls": tool_calls}
+
+    return {"reply": str(result), "tool_calls": tool_calls}
 
 
 # ── Eval dataset ──────────────────────────────────────────────

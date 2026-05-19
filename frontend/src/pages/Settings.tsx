@@ -21,6 +21,7 @@ interface DomainEnvConfig {
   env: Env;
   workspace_url: string;
   token: string;
+  warehouse_id: string;
   notes: string;
   updated_at: string | null;
 }
@@ -81,6 +82,7 @@ const EMPTY_DOMAIN_ENV = (env: Env): DomainEnvConfig => ({
   env,
   workspace_url: "",
   token: "",
+  warehouse_id: "",
   notes: "",
   updated_at: null,
 });
@@ -561,6 +563,15 @@ export default function Settings() {
                                   placeholder="dapi••••••••••••••••••••••••••••••••"
                                   value={envCfg.token}
                                   onChange={(e) => updateEnvField(d.domain, env, "token", e.target.value)}
+                                />
+                              </div>
+                              <div className="st-field">
+                                <label className="st-label">Warehouse ID</label>
+                                <input
+                                  className="st-input"
+                                  placeholder="abc123def456"
+                                  value={envCfg.warehouse_id}
+                                  onChange={(e) => updateEnvField(d.domain, env, "warehouse_id", e.target.value)}
                                 />
                               </div>
                             </div>

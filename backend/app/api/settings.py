@@ -1159,7 +1159,7 @@ def list_models():
 def _get_all_domain_envs() -> list[dict]:
     from app.api import lakebase
     return lakebase.execute("""
-        SELECT domain, env, workspace_url, token, notes, updated_at
+        SELECT domain, env, workspace_url, token, warehouse_id, notes, updated_at
         FROM app.domain_envs
         ORDER BY domain,
                  CASE env WHEN 'dev' THEN 1 WHEN 'staging' THEN 2 WHEN 'prod' THEN 3 ELSE 4 END
@@ -1287,6 +1287,7 @@ class DomainEnvConfig(BaseModel):
     env: str
     workspace_url: str = ""
     token: str = ""
+    warehouse_id: str = ""
     notes: str = ""
 
 
@@ -1294,6 +1295,7 @@ class SaveDomainEnvRequest(BaseModel):
     env: str
     workspace_url: str = ""
     token: str = ""
+    warehouse_id: str = ""
     notes: str = ""
 
 
@@ -1320,6 +1322,7 @@ def list_domains():
             "env":           r["env"],
             "workspace_url": r.get("workspace_url") or "",
             "token":         r.get("token") or "",
+            "warehouse_id":  r.get("warehouse_id") or "",
             "notes":         r.get("notes") or "",
             "updated_at":    r.get("updated_at"),
         })
@@ -1328,7 +1331,7 @@ def list_domains():
         existing_envs = {e["env"] for e in d_data["envs"]}
         for env in ENVS:
             if env not in existing_envs:
-                d_data["envs"].append({"env": env, "workspace_url": "", "token": "", "notes": "", "updated_at": None})
+                d_data["envs"].append({"env": env, "workspace_url": "", "token": "", "warehouse_id": "", "notes": "", "updated_at": None})
         d_data["envs"].sort(key=lambda e: ("dev", "staging", "prod").index(e["env"]) if e["env"] in ("dev", "staging", "prod") else 99)
     return {"domains": list(domain_map.values())}
 
@@ -1341,14 +1344,15 @@ def save_domain_env(domain: str, env: str, body: SaveDomainEnvRequest):
         raise HTTPException(status_code=503, detail="Lakebase não configurado.")
     from app.api import lakebase
     lakebase.execute("""
-        INSERT INTO app.domain_envs (domain, env, workspace_url, token, notes, updated_at)
-        VALUES (%s, %s, %s, %s, %s, NOW())
+        INSERT INTO app.domain_envs (domain, env, workspace_url, token, warehouse_id, notes, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (domain, env) DO UPDATE SET
             workspace_url = EXCLUDED.workspace_url,
             token         = EXCLUDED.token,
+            warehouse_id  = EXCLUDED.warehouse_id,
             notes         = EXCLUDED.notes,
             updated_at    = NOW()
-    """, (domain, env, body.workspace_url or "", body.token or "", body.notes or ""))
+    """, (domain, env, body.workspace_url or "", body.token or "", body.warehouse_id or "", body.notes or ""))
     # Create per-domain schema if this is the first time this domain is registered
     try:
         lakebase.create_domain_schema(domain)

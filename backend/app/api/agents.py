@@ -295,7 +295,7 @@ def promote_agent(agent_id: str, domain: str | None = Query(default=None)):
 
         yield _sse({"step": f"Verificando configurações do ambiente {next_env}..."})
         dst_row = lakebase.execute_one(
-            "SELECT workspace_url, token FROM app.domain_envs WHERE domain = %s AND env = %s",
+            "SELECT workspace_url, token, warehouse_id FROM app.domain_envs WHERE domain = %s AND env = %s",
             (d, next_env),
         )
         if not dst_row or not dst_row.get("workspace_url"):
@@ -304,7 +304,7 @@ def promote_agent(agent_id: str, domain: str | None = Query(default=None)):
         w_dst = _workspace_client_for_env(dst_row)
         staging_host = dst_row["workspace_url"].rstrip("/") if next_env == "staging" else ""
         catalog_dst = settings.framework_catalog
-        wh_dst = ""  # not stored in domain_envs; Genie promotion skipped if empty
+        wh_dst = (dst_row.get("warehouse_id") or "").strip()
 
         # ── 1. Register MLflow experiment ─────────────────────────
         mlflow_experiment_id: str | None = None
@@ -350,24 +350,7 @@ def promote_agent(agent_id: str, domain: str | None = Query(default=None)):
         )
         endpoint = _ENV_FRAMEWORK_ENDPOINT.get(next_env, _FRAMEWORK_ENDPOINT)
 
-        # ── 2. Promote agent record ────────────────────────────────
-        yield _sse({"step": "Promovendo agente..."})
-        lakebase.execute(
-            f"""
-            UPDATE "{d}".agents_config
-            SET environment           = %s,
-                serving_endpoint_name = %s,
-                mlflow_experiment_id  = COALESCE(%s, mlflow_experiment_id),
-                mlflow_url            = COALESCE(%s, mlflow_url),
-                approval_requested    = FALSE,
-                status                = 'active',
-                updated_at            = NOW()
-            WHERE agent_id = %s
-            """,
-            (next_env, endpoint, mlflow_experiment_id, mlflow_url_val, agent_id),
-        )
-
-        # ── 3. Promote tools ───────────────────────────────────────
+        # ── 2. Promote tools FIRST — abort if any fail ────────────
         tools_enabled: list[str] = agent.get("tools_enabled") or []
         if tools_enabled:
             yield _sse({"step": f"Promovendo {len(tools_enabled)} tool(s)..."})
@@ -385,12 +368,16 @@ def promote_agent(agent_id: str, domain: str | None = Query(default=None)):
                         (tool_name,),
                     )
                     if tool is None:
-                        continue
+                        yield _sse({"error": f"Tool '{tool_name}' não encontrada em tools_config (domínio '{d}'). Registre a tool antes de promover."})
+                        return
                     new_ref = tool["ref"]
                     if tool.get("kind") == "mcp_genie":
-                        if not w_src or not wh_dst:
-                            print(f"[Promote] Genie '{tool_name}' skipped: workspace or warehouse not configured.", file=sys.stderr)
-                            continue
+                        if not w_src:
+                            yield _sse({"error": f"Tool '{tool_name}' (mcp_genie) não pode ser promovida: workspace de origem (env '{env_src}') não configurado em domain_envs para o domínio '{d}'."})
+                            return
+                        if not wh_dst:
+                            yield _sse({"error": f"Tool '{tool_name}' (mcp_genie) não pode ser promovida: nenhum SQL warehouse encontrado no workspace de destino ('{next_env}'). Verifique se existe um warehouse ativo."})
+                            return
                         try:
                             new_ref = _promote_genie_space(
                                 src_ref=tool["ref"],
@@ -402,14 +389,34 @@ def promote_agent(agent_id: str, domain: str | None = Query(default=None)):
                                 target_host=staging_host,
                             )
                         except HTTPException as exc:
-                            print(f"[Promote] Genie space para tool '{tool_name}' falhou: {exc.detail}", file=sys.stderr)
-                            continue
+                            yield _sse({"error": f"Falha ao promover Genie space da tool '{tool_name}': {exc.detail}"})
+                            return
                     lakebase.execute(
                         f'UPDATE "{d}".tools_config SET environment = %s, ref = %s, status = \'active\', approved_at = NOW() WHERE tool_name = %s',
                         (next_env, new_ref, tool_name),
                     )
-                except Exception:
-                    pass  # non-critical
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    yield _sse({"error": f"Erro ao promover tool '{tool_name}': {exc}"})
+                    return
+
+        # ── 3. Promote agent record (only if all tools succeeded) ──
+        yield _sse({"step": "Promovendo agente..."})
+        lakebase.execute(
+            f"""
+            UPDATE "{d}".agents_config
+            SET environment           = %s,
+                serving_endpoint_name = %s,
+                mlflow_experiment_id  = COALESCE(%s, mlflow_experiment_id),
+                mlflow_url            = COALESCE(%s, mlflow_url),
+                approval_requested    = FALSE,
+                status                = 'active',
+                updated_at            = NOW()
+            WHERE agent_id = %s
+            """,
+            (next_env, endpoint, mlflow_experiment_id, mlflow_url_val, agent_id),
+        )
 
         yield _sse({
             "done": True,

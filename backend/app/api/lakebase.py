@@ -175,10 +175,16 @@ def ensure_schema() -> None:
             env           TEXT        NOT NULL,
             workspace_url TEXT,
             token         TEXT,
+            warehouse_id  TEXT,
             notes         TEXT,
             updated_at    TIMESTAMPTZ DEFAULT NOW(),
             PRIMARY KEY (domain, env)
         )
+    """)
+    # Idempotent: add warehouse_id column if it didn't exist yet
+    execute("""
+        ALTER TABLE app.domain_envs
+        ADD COLUMN IF NOT EXISTS warehouse_id TEXT
     """)
     execute("""
         CREATE TABLE IF NOT EXISTS app.domain_model_approvals (

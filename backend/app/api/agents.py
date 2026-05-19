@@ -317,25 +317,28 @@ def promote_agent(agent_id: str, domain: str | None = Query(default=None)):
                 except Exception:
                     pass
                 try:
-                    create_resp = w_dst.experiments.create_experiment(
-                        name=exp_name,
-                        tags=[ExperimentTag(key="mlflow.experimentType", value="GENAI_EXPERIMENT")],
-                    )
+                    create_resp = w_dst.experiments.create_experiment(name=exp_name)
                     mlflow_experiment_id = create_resp.experiment_id
                 except Exception:
                     get_resp = w_dst.experiments.get_by_name(experiment_name=exp_name)
                     if get_resp and get_resp.experiment:
                         mlflow_experiment_id = get_resp.experiment.experiment_id
-                        try:
-                            w_dst.experiments.set_experiment_tag(
-                                experiment_id=mlflow_experiment_id,
-                                key="mlflow.experimentType",
-                                value="GENAI_EXPERIMENT",
-                            )
-                        except Exception:
-                            pass
                 if not mlflow_experiment_id:
                     raise ValueError("experiment_id não retornado após create/get_by_name.")
+                # Mark as GenAI apps & agents type with tracing enabled
+                yield _sse({"step": "Configurando experimento como GenAI apps & agents..."})
+                for tag_key, tag_value in [
+                    ("mlflow.experimentKind", "genai_development"),
+                    ("mlflow.enableTracing",  "true"),
+                ]:
+                    try:
+                        w_dst.experiments.set_experiment_tag(
+                            experiment_id=mlflow_experiment_id,
+                            key=tag_key,
+                            value=tag_value,
+                        )
+                    except Exception as tag_exc:
+                        print(f"[MLflow] set_experiment_tag {tag_key} falhou: {tag_exc}", file=sys.stderr)
             except Exception as exc:
                 yield _sse({"error": f"Falha ao registrar experimento MLflow: {exc}"})
                 return

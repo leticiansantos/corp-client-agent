@@ -1,0 +1,753 @@
+/* ── Shell ───────────────────────────────────────────────────── */
+.gr-shell {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 64px);
+  overflow: hidden;
+  background: #F7F8F8;
+}
+
+/* ── Header ──────────────────────────────────────────────────── */
+.gr-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px;
+  height: 64px;
+  background: #fff;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+  gap: 16px;
+}
+
+.gr-header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.gr-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin: 0;
+}
+
+.gr-count {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+.gr-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ── New button ──────────────────────────────────────────────── */
+.gr-new-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  background: var(--color-primary);
+  color: #fff;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.gr-new-btn:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.gr-new-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Info box ────────────────────────────────────────────────── */
+.gr-info-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 16px 32px 0;
+  padding: 12px 16px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.gr-info-icon {
+  color: #1d4ed8;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.gr-info-text {
+  font-size: 0.82rem;
+  color: #1e3a5f;
+  line-height: 1.55;
+}
+
+.gr-info-text strong {
+  font-weight: 700;
+}
+
+/* ── Tutorial ────────────────────────────────────────────────── */
+.gr-tutorial {
+  margin: 10px 32px 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #fff;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.gr-tutorial-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 10px 16px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.83rem;
+  font-weight: 600;
+  color: var(--color-navy);
+  text-align: left;
+  transition: background 0.12s;
+}
+
+.gr-tutorial-toggle:hover {
+  background: var(--color-bg);
+}
+
+.gr-tutorial-chevron {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  transition: transform 0.18s;
+}
+
+.gr-tutorial-chevron.open {
+  transform: rotate(180deg);
+}
+
+.gr-tutorial-body {
+  border-top: 1px solid var(--color-border);
+  padding: 20px;
+}
+
+.gr-tut-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.gr-tut-card {
+  background: #fafbfc;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.gr-tut-card-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--color-navy);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.gr-tut-p {
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.gr-tut-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gr-tut-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.gr-tut-item-desc {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  line-height: 1.45;
+}
+
+.gr-tut-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gr-tut-steps li {
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+.gr-tut-steps code {
+  font-family: "DM Mono", monospace;
+  font-size: 0.75rem;
+  background: #f1f5f9;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--color-navy);
+}
+
+/* ── Body ────────────────────────────────────────────────────── */
+.gr-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 32px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ── State ───────────────────────────────────────────────────── */
+.gr-state {
+  text-align: center;
+  padding: 64px 24px;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+
+.gr-error-banner {
+  padding: 12px 16px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #b91c1c;
+  font-size: 0.875rem;
+}
+
+/* ── Section ─────────────────────────────────────────────────── */
+.gr-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.gr-section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1.5px solid var(--color-border);
+}
+
+.gr-section-count {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+.gr-section-empty {
+  font-size: 0.83rem;
+  color: var(--color-text-muted);
+  padding: 10px 0 4px;
+}
+
+/* ── Stage badge ─────────────────────────────────────────────── */
+.gr-stage-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 5px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: "DM Mono", monospace;
+}
+
+.gr-stage-input  { background: #e0f2fe; color: #0369a1; }
+.gr-stage-output { background: #f0fdf4; color: #15803d; }
+.gr-stage-tool   { background: #fdf4ff; color: #7c3aed; }
+
+/* ── Table ───────────────────────────────────────────────────── */
+.gr-table-wrap {
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.gr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.gr-table thead tr {
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.gr-table th {
+  padding: 10px 16px;
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-subtle, #8a9aaa);
+  white-space: nowrap;
+}
+
+.gr-table td {
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--color-border-light, #f0f2f3);
+  vertical-align: middle;
+}
+
+.gr-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.gr-table tbody tr:hover {
+  background: #fafbfc;
+}
+
+.gr-row-disabled td {
+  opacity: 0.55;
+}
+
+/* ── Name ────────────────────────────────────────────────────── */
+.gr-name {
+  font-weight: 600;
+  color: var(--color-navy);
+  font-family: "DM Mono", monospace;
+  font-size: 0.82rem;
+}
+
+/* ── Action badge ────────────────────────────────────────────── */
+.gr-action-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: "DM Mono", monospace;
+  white-space: nowrap;
+}
+
+.gr-action-block    { background: #fef2f2; color: #b91c1c; }
+.gr-action-sanitize { background: #fef3c7; color: #92400e; }
+.gr-action-warn     { background: #fff7ed; color: #c05621; }
+.gr-action-log      { background: #f1f5f9; color: #475569; }
+
+/* ── Type badge ──────────────────────────────────────────────── */
+.gr-type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.gr-type-default { background: #f1f5f9; color: #64748b; }
+.gr-type-custom  { background: #ede9fe; color: #5b21b6; }
+
+/* ── Status badge ────────────────────────────────────────────── */
+.gr-status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.gr-status-enabled  { background: #e6f9f0; color: #047857; }
+.gr-status-disabled { background: #f1f5f9; color: #64748b; }
+
+/* ── Priority col ────────────────────────────────────────────── */
+.gr-col-priority {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  text-align: center;
+  width: 60px;
+}
+
+/* ── Desc col ────────────────────────────────────────────────── */
+.gr-col-desc {
+  max-width: 300px;
+}
+
+.gr-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+/* ── Actions col ─────────────────────────────────────────────── */
+.gr-col-actions {
+  white-space: nowrap;
+}
+
+.gr-action-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.gr-readonly-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.gr-toggle-btn {
+  padding: 4px 12px;
+  border-radius: 5px;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1.5px solid;
+  transition: background 0.12s, opacity 0.12s;
+}
+
+.gr-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gr-toggle-disable {
+  background: #fff;
+  border-color: #d1d5db;
+  color: #6b7280;
+}
+
+.gr-toggle-disable:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #f87171;
+  color: #b91c1c;
+}
+
+.gr-toggle-enable {
+  background: #f0fdf4;
+  border-color: #86efac;
+  color: #15803d;
+}
+
+.gr-toggle-enable:hover:not(:disabled) {
+  background: #dcfce7;
+}
+
+.gr-edit-btn {
+  padding: 4px 12px;
+  border: 1.5px solid #d1d5db;
+  border-radius: 5px;
+  background: #fff;
+  color: #374151;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, opacity 0.12s;
+}
+
+.gr-edit-btn:hover:not(:disabled) {
+  background: #eff6ff;
+  border-color: #60a5fa;
+  color: #1d4ed8;
+}
+
+.gr-edit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gr-delete-btn {
+  padding: 4px 12px;
+  border: 1.5px solid #d1d5db;
+  border-radius: 5px;
+  background: #fff;
+  color: #6b7280;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, opacity 0.12s;
+}
+
+.gr-delete-btn:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #ef4444;
+  color: #b91c1c;
+}
+
+.gr-delete-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Modal overlay ───────────────────────────────────────────── */
+.gr-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gr-modal {
+  background: #fff;
+  border-radius: 12px;
+  width: 520px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.gr-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px 14px;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.gr-modal-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--color-navy);
+  margin: 0;
+}
+
+.gr-modal-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 1.3rem;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.gr-modal-close:hover {
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.gr-modal-body {
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.gr-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 12px 24px;
+  border-top: 1px solid var(--color-border);
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* ── Form ────────────────────────────────────────────────────── */
+.gr-form-row {
+  display: flex;
+  gap: 12px;
+}
+
+.gr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.gr-field-grow {
+  flex: 1;
+}
+
+.gr-field-inline {
+  flex-direction: row;
+  align-items: center;
+}
+
+.gr-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-navy);
+}
+
+.gr-label-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.gr-checkbox {
+  width: 14px;
+  height: 14px;
+  accent-color: #FF3621;
+  cursor: pointer;
+}
+
+.gr-input {
+  padding: 7px 11px;
+  border: 1.5px solid var(--color-border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.875rem;
+  color: var(--color-text);
+  background: var(--color-surface);
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.gr-input:focus {
+  border-color: var(--color-navy);
+}
+
+.gr-input-error {
+  border-color: #ef4444;
+}
+
+.gr-textarea {
+  resize: vertical;
+  min-height: 70px;
+  font-family: "DM Mono", monospace;
+  font-size: 0.82rem;
+}
+
+.gr-field-hint {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+}
+
+.gr-field-hint code {
+  font-family: "DM Mono", monospace;
+  font-size: 0.72rem;
+  color: var(--color-navy);
+}
+
+.gr-field-error {
+  font-size: 0.74rem;
+  color: #b91c1c;
+}
+
+.req {
+  color: var(--color-primary);
+}
+
+/* ── Save banners ────────────────────────────────────────────── */
+.gr-save-ok {
+  padding: 9px 14px;
+  background: #e6f9f0;
+  border: 1px solid #a7f3d0;
+  border-radius: 6px;
+  color: #047857;
+  font-size: 0.85rem;
+}
+
+.gr-save-error {
+  padding: 9px 14px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: #b91c1c;
+  font-size: 0.85rem;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────── */
+.gr-cancel-btn {
+  padding: 7px 16px;
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-text);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.gr-cancel-btn:hover:not(:disabled) {
+  border-color: var(--color-navy);
+  background: var(--color-bg);
+}
+
+.gr-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gr-submit-btn {
+  padding: 7px 20px;
+  background: var(--color-primary);
+  border: none;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.gr-submit-btn:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.gr-submit-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Readonly input (edit mode) ──────────────────────────────── */
+.gr-input-readonly {
+  display: flex;
+  align-items: center;
+  background: var(--color-bg);
+  border-color: transparent;
+  color: var(--color-text-muted);
+  cursor: default;
+  min-height: 36px;
+}

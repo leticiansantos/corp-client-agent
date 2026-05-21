@@ -10,11 +10,13 @@ import time
 import psycopg
 import requests
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 from app.config import settings
 
 _token: str = ""
 _token_expiry: float = 0.0
+_pool: ConnectionPool | None = None
 
 
 def _refresh_token() -> None:
@@ -64,25 +66,53 @@ def _refresh_token() -> None:
 
 
 def _ensure_token() -> str:
+    global _pool
     if not _token or time.time() >= _token_expiry:
         _refresh_token()
+        # Invalidate pool so connections are rebuilt with the new token
+        if _pool and not _pool.closed:
+            try:
+                _pool.close()
+            except Exception:
+                pass
+        _pool = None
     return _token
 
 
-def get_connection() -> psycopg.Connection:
-    return psycopg.connect(
-        host=settings.lakebase_host,
-        dbname=settings.lakebase_database,
-        user=settings.databricks_client_id,
-        password=_ensure_token(),
-        sslmode="require",
-        row_factory=dict_row,
+def _conninfo() -> str:
+    token = _ensure_token()
+    host  = settings.lakebase_host
+    db    = settings.lakebase_database
+    user  = settings.databricks_client_id
+    # psycopg conninfo string — password is URL-encoded inside the library
+    return (
+        f"host={host} dbname={db} user={user} password={token} "
+        f"sslmode=require"
     )
+
+
+def _get_pool() -> ConnectionPool:
+    global _pool
+    if _pool is None or _pool.closed:
+        _pool = ConnectionPool(
+            conninfo=_conninfo(),
+            min_size=1,
+            max_size=5,
+            kwargs={"row_factory": dict_row},
+            open=True,
+        )
+    return _pool
+
+
+def get_connection() -> psycopg.Connection:
+    """Return a connection from the pool (use as context manager)."""
+    return _get_pool().getconn()
 
 
 def execute(sql: str, params: tuple = ()) -> list[dict]:
     """Execute SQL and return a list of row dicts."""
-    with get_connection() as conn:
+    pool = _get_pool()
+    with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             if cur.description:
@@ -140,7 +170,8 @@ def create_domain_schema(domain: str) -> None:
                     mlflow_experiment_id  TEXT,
                     mlflow_url            TEXT,
                     eval_run_id           TEXT,
-                    eval_status           TEXT
+                    eval_status           TEXT,
+                    guardrails_config     JSONB
                 )
             """)
             cur.execute(f"""
@@ -157,6 +188,7 @@ def create_domain_schema(domain: str) -> None:
                 CREATE INDEX IF NOT EXISTS "idx_eval_{idx}_agent_id"
                 ON "{domain}".eval_datasets(agent_id)
             """)
+            _migrate_domain(cur, domain)
         conn.commit()
 
 
@@ -164,6 +196,48 @@ def list_domain_schemas() -> list[str]:
     """Return all domain names from app.domain_envs."""
     rows = execute("SELECT DISTINCT domain FROM app.domain_envs ORDER BY domain")
     return [r["domain"] for r in rows]
+
+
+def migrate_domain(domain: str) -> None:
+    """Public idempotent per-domain migration — safe to call on every request."""
+    pool = _get_pool()
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            _migrate_domain(cur, domain)
+        conn.commit()
+
+
+def _migrate_domain(cur, domain: str) -> None:
+    """Idempotent per-domain migrations — called for every known domain at startup.
+
+    NOTE: No ALTER TABLE here — the service principal is not the table owner and
+    cannot run DDL on tables it doesn't own. Schema migrations that require ALTER TABLE
+    must be run via setup/lakebase/setup_lakebase.py --migrate as the owner user.
+    """
+    # guardrails_defaults table
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS "{domain}".guardrails_defaults (
+            stage       TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            action      TEXT NOT NULL DEFAULT 'block',
+            params      JSONB DEFAULT '{{}}'::jsonb,
+            enabled     BOOLEAN NOT NULL DEFAULT true,
+            priority    INT NOT NULL DEFAULT 0,
+            description TEXT,
+            created_at  TIMESTAMPTZ DEFAULT NOW(),
+            updated_at  TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (stage, name)
+        )
+    """)
+    # Seed default entries (idempotent)
+    cur.execute(f"""
+        INSERT INTO "{domain}".guardrails_defaults (stage, name, action, params, priority, description)
+        VALUES
+            ('input',  'pii_detector',    'block',    '{{}}'::jsonb, 0, 'Blocks messages containing PII (CPF, email, phone, credit card)'),
+            ('input',  'prompt_injection', 'block',    '{{}}'::jsonb, 1, 'Blocks common prompt injection attempts'),
+            ('output', 'pii_scrubber',     'sanitize', '{{}}'::jsonb, 0, 'Redacts PII from agent responses')
+        ON CONFLICT (stage, name) DO NOTHING
+    """)
 
 
 def ensure_schema() -> None:
@@ -196,3 +270,14 @@ def ensure_schema() -> None:
             PRIMARY KEY (domain, model_name)
         )
     """)
+    # Run per-domain migrations for all existing domains
+    try:
+        domains = list_domain_schemas()
+        if domains:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    for domain in domains:
+                        _migrate_domain(cur, domain)
+                conn.commit()
+    except Exception:
+        pass  # Domains may not exist yet on first boot

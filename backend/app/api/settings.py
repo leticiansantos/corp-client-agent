@@ -32,7 +32,7 @@ ENVS = ("dev", "staging", "prod")
 
 ENDPOINT_NAME_TPL        = "corp-config-driven-agent-{env}"
 DOMAIN_ENDPOINT_NAME_TPL = "corp-config-driven-agent-{domain}-{env}"
-_CORP_WHL_VERSION  = "0.3.14"
+_CORP_WHL_VERSION  = "0.3.17"
 _CORP_MODEL_SUFFIX = "corp_config_driven_agent"
 
 # In-process deploy tracking (survives server restart via jobs API check)
@@ -118,8 +118,8 @@ class _EnvSession:
         self._raise(r)
         return r.json() if r.content else {}
 
-    def _post(self, path: str, body: dict | None = None) -> dict:
-        r = self._s.post(f"{self._host}{path}", json=body or {}, timeout=60)
+    def _post(self, path: str, body: dict | None = None, timeout: int = 300) -> dict:
+        r = self._s.post(f"{self._host}{path}", json=body or {}, timeout=timeout)
         self._raise(r)
         return r.json() if r.content else {}
 

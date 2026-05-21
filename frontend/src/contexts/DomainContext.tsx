@@ -15,18 +15,40 @@ const DomainContext = createContext<DomainContextValue>({
   domainsLoading: true,
 });
 
+const CACHE_KEY = "corp_agent_domains";
+
+function readCache(): string[] {
+  try {
+    const raw = sessionStorage.getItem(CACHE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCache(list: string[]) {
+  try {
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify(list));
+  } catch {
+    // ignore
+  }
+}
+
 export function DomainProvider({ children }: { children: ReactNode }) {
-  const [domain, setDomain] = useState("");
-  const [domains, setDomains] = useState<string[]>([]);
-  const [domainsLoading, setDomainsLoading] = useState(true);
+  const cached = readCache();
+  const [domain, setDomain] = useState(cached.length === 1 ? cached[0] : "");
+  const [domains, setDomains] = useState<string[]>(cached);
+  const [domainsLoading, setDomainsLoading] = useState(cached.length === 0);
 
   useEffect(() => {
-    setDomainsLoading(true);
+    // Only show spinner if we have nothing cached yet
+    if (domains.length === 0) setDomainsLoading(true);
     api
       .get<{ domains: { domain: string }[] }>("/settings/domains")
       .then((r) => {
         const list = r.data.domains.map((d) => d.domain);
         setDomains(list);
+        writeCache(list);
         // Auto-select when only one domain exists
         if (list.length === 1) setDomain(list[0]);
       })

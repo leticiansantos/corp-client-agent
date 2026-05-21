@@ -7,15 +7,12 @@ Routes:
 
 import json
 
-from databricks.sdk import WorkspaceClient
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
 from app.api import lakebase
 from app.api.settings import (
     DOMAIN_ENDPOINT_NAME_TPL,
-    ENDPOINT_NAME_TPL,
-    _get_env_config_from_db,
     _get_env_session,
 )
 
@@ -50,34 +47,23 @@ def chat(body: ChatRequest):
             detail="agent_id é obrigatório.",
         )
 
-    # When a domain is specified, use domain-specific workspace + endpoint
-    if body.domain:
-        rows = lakebase.execute(
-            "SELECT workspace_url, token FROM domain_envs WHERE domain = %s AND env = %s",
-            (body.domain, body.env),
+    if not body.domain:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="domain é obrigatório.",
         )
-        if not rows or not rows[0].get("workspace_url") or not rows[0].get("token"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Workspace do domínio '{body.domain}/{body.env}' não configurado.",
-            )
-        env_cfg = rows[0]
-        endpoint_name = DOMAIN_ENDPOINT_NAME_TPL.format(domain=body.domain, env=body.env)
-    else:
-        try:
-            env_cfg = _get_env_config_from_db(body.env)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Erro ao ler configuração do ambiente: {exc}",
-            ) from exc
 
-        if not env_cfg or not env_cfg.get("workspace_url") or not env_cfg.get("token"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Workspace do ambiente '{body.env}' não configurado.",
-            )
-        endpoint_name = ENDPOINT_NAME_TPL.format(env=body.env)
+    rows = lakebase.execute(
+        "SELECT workspace_url, token FROM app.domain_envs WHERE domain = %s AND env = %s",
+        (body.domain, body.env),
+    )
+    if not rows or not rows[0].get("workspace_url") or not rows[0].get("token"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workspace do domínio '{body.domain}/{body.env}' não configurado. Configure em Configurações.",
+        )
+    env_cfg = rows[0]
+    endpoint_name = DOMAIN_ENDPOINT_NAME_TPL.format(domain=body.domain, env=body.env)
 
     try:
         sess = _get_env_session(env_cfg)
@@ -89,10 +75,15 @@ def chat(body: ChatRequest):
             },
         )
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Erro ao chamar o endpoint '{endpoint_name}': {exc}",
-        ) from exc
+        import socket
+        if "timed out" in str(exc).lower() or isinstance(exc, (TimeoutError, socket.timeout)):
+            detail = (
+                f"O endpoint '{endpoint_name}' demorou demais para responder. "
+                "Pode estar fazendo cold start — tente novamente em alguns segundos."
+            )
+        else:
+            detail = f"Erro ao chamar o endpoint '{endpoint_name}': {exc}"
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
     # Format 1: Responses API  {"output": [{"type": "message", "content": [{"type": "output_text", "text": "..."}]}]}
     output = result.get("output") or []

@@ -569,6 +569,24 @@ export default function Tools() {
 
       {/* ── Body ── */}
       <div className="tl-body">
+        {/* ── Info box ── */}
+        {activeTab === "tools" && (
+          <div className="tl-info-box">
+            <svg className="tl-info-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/>
+              <path d="M8 7v5M8 5v.01" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+            <div className="tl-info-text">
+              <strong>O que é uma Tool?</strong> Tools são capacidades que um agente pode usar para
+              responder perguntas — como consultar uma base de dados via Genie, buscar documentos em
+              Vector Search, executar funções Unity Catalog ou delegar para outro agente. Cada tool é
+              registrada com um tipo, uma referência (MCP URL ou ID de recurso) e um owner.
+              {" "}<strong>Registro</strong> cria a tool com status <em>pending_review</em>; um admin
+              precisa aprová-la antes de ela ficar disponível para uso em agentes.
+            </div>
+          </div>
+        )}
+
         {loading && <div className="tl-state">Carregando tools...</div>}
 
         {!loading && error && (

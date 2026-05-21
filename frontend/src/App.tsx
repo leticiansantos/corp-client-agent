@@ -3,6 +3,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import Layout from "./components/Layout";
 import { DomainProvider } from "./contexts/DomainContext";
 import { AdminProvider, useAdmin } from "./contexts/AdminContext";
+import Guardrails from "./pages/Guardrails";
 import Home from "./pages/Home";
 import Tools from "./pages/Tools";
 import Agents from "./pages/Agents";
@@ -34,6 +35,7 @@ export default function App() {
               <Route index element={<Home />} />
               <Route path="tools" element={<Tools />} />
               <Route path="agents" element={<Agents />} />
+              <Route path="guardrails" element={<Guardrails />} />
               <Route path="run" element={<Run />} />
               <Route path="settings" element={<AdminRoute><Settings /></AdminRoute>} />
               <Route path="*" element={<Navigate to="/" replace />} />

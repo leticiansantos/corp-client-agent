@@ -6,9 +6,10 @@ import "./Layout.css";
 const DBX_LOGO = "https://cdn.brandfetch.io/idSUrLOWbH/w/400/h/98/theme/dark/logo.png";
 
 const BASE_NAV_ITEMS = [
-  { label: "Tools",  to: "/tools" },
-  { label: "Agents", to: "/agents" },
-  { label: "Run",    to: "/run" },
+  { label: "Tools",      to: "/tools" },
+  { label: "Agents",     to: "/agents" },
+  { label: "Guardrails", to: "/guardrails" },
+  { label: "Run",        to: "/run" },
 ];
 
 export default function Layout() {

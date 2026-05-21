@@ -84,7 +84,7 @@ export default function Run() {
   const selectedAgent = agents.find((a) => a.agent_id === selectedAgentId) ?? null;
   const tools = selectedAgent?.tools_enabled ?? [];
 
-  const canSend = !!selectedAgentId && !!input.trim() && !sending;
+  const canSend = !!domain && !!selectedAgentId && !!input.trim() && !sending;
 
   async function sendMessage() {
     const text = input.trim();
@@ -264,14 +264,16 @@ export default function Run() {
               ref={textareaRef}
               className="rn-textarea"
               placeholder={
-                !selectedAgentId
+                !domain
+                  ? "Selecione um domínio no topo da página para começar…"
+                  : !selectedAgentId
                   ? "Selecione um agente para começar…"
                   : "Envie uma mensagem… (Enter para enviar, Shift+Enter para nova linha)"
               }
               value={input}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
-              disabled={!selectedAgentId || sending}
+              disabled={!domain || !selectedAgentId || sending}
               rows={1}
             />
             <button

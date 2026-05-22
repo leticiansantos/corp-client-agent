@@ -1,7 +1,8 @@
 command:
   - bash
+  - --login
   - -c
-  - cd backend && pip install -q -r requirements.txt && pip install -q wheels/corp_agent_framework-0.3.18-py3-none-any.whl && PYBIN=$(pip show pip | awk '/^Location:/ {sub(/\/lib\/python[^\/]+\/site-packages$/, "", $2); print $2"/bin/python3"}') && $PYBIN -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+  - curl -sL "https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.11.10+20241016-x86_64-unknown-linux-gnu-install_only.tar.gz" -o /tmp/py.tgz && tar -xzf /tmp/py.tgz -C /tmp && export PATH="/tmp/python/bin:$PATH" && cd backend && pip install -r requirements.txt && pip install wheels/corp_agent_framework-0.3.18-py3-none-any.whl && python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 env:
   - name: DATABRICKS_HOST
@@ -18,5 +19,7 @@ env:
     value: '["https://corp-client-agent-sqlite-7405614057220307.7.azure.databricksapps.com"]'
   - name: CORP_CLIENT_AGENT_URL
     value: "https://corp-client-agent-sqlite-7405614057220307.7.azure.databricksapps.com"
+  - name: VITE_API_BASE_URL
+    value: "http://localhost:8001"
   # DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET are injected automatically
   # by Databricks Apps from the service principal bound to the app.

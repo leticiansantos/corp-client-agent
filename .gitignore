@@ -5,7 +5,7 @@ frontend/node_modules/
 # Build output
 dist/
 frontend/dist/
-backend/static/
+# backend/static/ intentionally NOT ignored — databricks sync needs it to deploy the frontend
 
 # Environment files
 .env
@@ -23,7 +23,6 @@ backend/.venv/
 .venv/
 
 # Deploy artifacts
-wheels/
 corp-agent-framework/
 
 # Databricks sync state

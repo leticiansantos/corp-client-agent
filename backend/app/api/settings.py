@@ -332,7 +332,7 @@ def _env_sql(sess: _EnvSession, warehouse_id: str, statement: str) -> None:
 def _get_wheels_whl() -> str:
     """Find the most recent WHL in the backend's wheels/ folder."""
     wheels_dir = _os.path.abspath(
-        _os.path.join(_os.path.dirname(__file__), "../../../wheels")
+        _os.path.join(_os.path.dirname(__file__), "../wheels")
     )
     if not _os.path.isdir(wheels_dir):
         raise RuntimeError(

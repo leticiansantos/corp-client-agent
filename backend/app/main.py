@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api.agents import router as agents_router
+from app.api.config_api import router as config_router
 from app.api.guardrails import router as guardrails_router
 from app.api.health import router as health_router
 from app.api.run import router as run_router
@@ -31,6 +32,7 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
+app.include_router(config_router)
 app.include_router(settings_router)
 app.include_router(tools_router)
 app.include_router(agents_router)

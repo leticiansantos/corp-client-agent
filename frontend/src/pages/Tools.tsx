@@ -76,7 +76,7 @@ const EMPTY_FORM: NewToolForm = {
 
 // ── Component ──────────────────────────────────────────────────
 export default function Tools() {
-  const { domain, domains, domainsLoading } = useDomain();
+  const { domain, domains } = useDomain();
   const { isAdmin } = useAdmin();
 
   const [tools, setTools]         = useState<Tool[]>([]);

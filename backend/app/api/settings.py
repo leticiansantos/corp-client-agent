@@ -11,9 +11,6 @@ Routes:
 import base64 as _b64
 import logging as _logging
 import os as _os
-import subprocess as _subprocess
-import sys as _sys
-import tempfile as _tempfile
 import threading as _threading
 import time as _time
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor, as_completed as _as_completed
@@ -32,7 +29,7 @@ ENVS = ("dev", "staging", "prod")
 
 ENDPOINT_NAME_TPL        = "corp-config-driven-agent-{env}"
 DOMAIN_ENDPOINT_NAME_TPL = "corp-config-driven-agent-{domain}-{env}"
-_CORP_WHL_VERSION  = "0.3.17"
+_CORP_WHL_VERSION  = "0.3.18"
 _CORP_MODEL_SUFFIX = "corp_config_driven_agent"
 
 # In-process deploy tracking (survives server restart via jobs API check)
@@ -331,59 +328,27 @@ def _env_sql(sess: _EnvSession, warehouse_id: str, statement: str) -> None:
 
 # ── WHL build & upload ─────────────────────────────────────────
 
-def _framework_dir() -> str:
-    return _os.path.abspath(
-        _os.path.join(_os.path.dirname(__file__), "../../../../corp-agent-framework")
+
+def _get_wheels_whl() -> str:
+    """Find the most recent WHL in the backend's wheels/ folder."""
+    wheels_dir = _os.path.abspath(
+        _os.path.join(_os.path.dirname(__file__), "../../../wheels")
     )
-
-
-def _build_whl() -> str:
-    """Build corp_agent_framework WHL from local source. Returns local .whl path."""
-    fdir = _framework_dir()
-    if not _os.path.isdir(fdir):
+    if not _os.path.isdir(wheels_dir):
         raise RuntimeError(
-            f"corp-agent-framework não encontrado em {fdir}. "
-            "Verifique a estrutura do repositório."
+            f"Pasta wheels/ não encontrada em {wheels_dir}. "
+            "Coloque o WHL do corp-agent-framework em corp-client-agent/wheels/."
         )
-    tmpdir = _tempfile.mkdtemp(prefix="corp_whl_")
-    result = _subprocess.run(
-        [_sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", "-q", "-w", tmpdir, fdir],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Falha ao buildar WHL: {result.stderr}")
-    whl_files = [f for f in _os.listdir(tmpdir) if f.endswith(".whl")]
-    if not whl_files:
-        raise RuntimeError("pip wheel não gerou nenhum arquivo .whl")
-    return _os.path.join(tmpdir, whl_files[0])
-
-
-def _get_local_whl() -> str:
-    """
-    In local_dev: find existing WHL in dist/ without rebuilding.
-    Builds once into dist/ if not found there.
-    """
-    dist_dir = _os.path.join(_framework_dir(), "dist")
-    _os.makedirs(dist_dir, exist_ok=True)
-    existing = sorted(
-        (f for f in _os.listdir(dist_dir) if f.endswith(".whl")),
+    whl_files = sorted(
+        (f for f in _os.listdir(wheels_dir) if f.endswith(".whl")),
         reverse=True,
     )
-    if existing:
-        return _os.path.join(dist_dir, existing[0])
-    # First time: build into dist/
-    fdir = _framework_dir()
-    result = _subprocess.run(
-        [_sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", "-q", "-w", dist_dir, fdir],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Falha ao buildar WHL: {result.stderr}")
-    whl_files = [f for f in _os.listdir(dist_dir) if f.endswith(".whl")]
     if not whl_files:
-        raise RuntimeError("pip wheel não gerou nenhum arquivo .whl")
-    return _os.path.join(dist_dir, whl_files[0])
+        raise RuntimeError(
+            f"Nenhum arquivo .whl encontrado em {wheels_dir}. "
+            "Copie o WHL do corp-agent-framework para corp-client-agent/wheels/."
+        )
+    return _os.path.join(wheels_dir, whl_files[0])
 
 
 # ── Deploy script generator ────────────────────────────────────
@@ -391,6 +356,7 @@ def _get_local_whl() -> str:
 def _generate_deploy_script(
     catalog: str, schema: str, warehouse_id: str, environment: str,
     workspace_url: str = "", token: str = "",
+    corp_client_agent_url: str = "", corp_config_token: str = "",
 ) -> str:
     endpoint_name = ENDPOINT_NAME_TPL.format(env=environment)
     model_name    = f"{catalog}.{schema}.{_CORP_MODEL_SUFFIX}_{environment}"
@@ -487,8 +453,11 @@ ep_config = EndpointCoreConfigInput(
             environment_vars={{
                 # Credentials so the serving container can call the SQL warehouse
                 # and read agents_config / tools_config at inference time.
-                "DATABRICKS_HOST":  "{workspace_url}",
-                "DATABRICKS_TOKEN": "{token}",
+                "DATABRICKS_HOST":         "{workspace_url}",
+                "DATABRICKS_TOKEN":        "{token}",
+                # corp-client-agent app URL — required by corp-agent-framework _api.py
+                "CORP_CLIENT_AGENT_URL":   "{corp_client_agent_url}",
+                "CORP_CLIENT_AGENT_TOKEN": "{corp_config_token}",
             }},
         )
     ],
@@ -514,18 +483,13 @@ print("DEPLOY_DONE")
 def _generate_deploy_script_lakebase(
     catalog: str, schema: str, environment: str, domain: str,
     workspace_url: str = "", token: str = "",
-    lakebase_host: str = "", lakebase_database: str = "",
-    lakebase_databricks_host: str = "",
-    lakebase_client_id: str = "", lakebase_client_secret: str = "",
+    corp_client_agent_url: str = "", corp_config_token: str = "",
 ) -> str:
-    """Generate a deploy notebook for the Lakebase-aware corp_agent_framework.
+    """Generate a deploy notebook for corp_agent_framework.
 
-    The serving endpoint reads agent/tool config from Lakebase (PostgreSQL),
-    so no Delta catalog/schema/warehouse_id is needed at inference time.
-
-    LAKEBASE_DATABRICKS_HOST is the stable workspace where Lakebase lives.
-    DATABRICKS_CLIENT_ID/SECRET are the service principal credentials for that workspace —
-    the SP UUID is also used as the PostgreSQL role name.
+    The serving endpoint reads agent/tool config from the corp-client-agent HTTP API.
+    CORP_CLIENT_AGENT_URL must point to the deployed Databricks App URL.
+    CORP_CLIENT_AGENT_TOKEN is optional — set if CORP_CONFIG_TOKEN is configured on the app.
     """
     endpoint_name = DOMAIN_ENDPOINT_NAME_TPL.format(domain=domain, env=environment)
     model_name    = f"{catalog}.{schema}.{_CORP_MODEL_SUFFIX}_{environment}"
@@ -617,18 +581,11 @@ ep_config = EndpointCoreConfigInput(
             scale_to_zero_enabled=True,
             environment_vars={{
                 # Domain workspace credentials — used for Genie/VS calls
-                "DATABRICKS_HOST":            "{workspace_url}",
-                "DATABRICKS_TOKEN":           "{token}",
-                # Lakebase (PostgreSQL) — central store for all environments
-                "LAKEBASE_HOST":              "{lakebase_host}",
-                "LAKEBASE_DATABASE":          "{lakebase_database}",
-                # Lakebase auth — dedicated SP for the stable workspace where Lakebase lives.
-                # LAKEBASE_CLIENT_ID/SECRET are used only by _pg.py (not by WorkspaceClient),
-                # avoiding the Databricks SDK "multiple auth methods" conflict with DATABRICKS_TOKEN.
-                # LAKEBASE_CLIENT_ID is also used as the PostgreSQL role name (SP UUID).
-                "LAKEBASE_DATABRICKS_HOST":   "{lakebase_databricks_host}",
-                "LAKEBASE_CLIENT_ID":         "{lakebase_client_id}",
-                "LAKEBASE_CLIENT_SECRET":     "{lakebase_client_secret}",
+                "DATABRICKS_HOST":          "{workspace_url}",
+                "DATABRICKS_TOKEN":         "{token}",
+                # corp-client-agent app URL — required by corp-agent-framework _api.py
+                "CORP_CLIENT_AGENT_URL":    "{corp_client_agent_url}",
+                "CORP_CLIENT_AGENT_TOKEN":  "{corp_config_token}",
             }},
         )
     ],
@@ -749,12 +706,8 @@ def _deploy_framework_background(env: str, env_cfg: dict) -> None:
         whl_name        = f"corp_agent_framework-{_CORP_WHL_VERSION}-py3-none-any.whl"
         whl_volume_path = f"/Volumes/{catalog}/{schema}/libs/{whl_name}"
 
-        if settings.local_dev:
-            _step("Build WHL (pulando — usando WHL local)...")
-            whl_local = _get_local_whl()
-        else:
-            _step("Buildando WHL do corp_agent_framework...")
-            whl_local = _build_whl()
+        _step("Localizando WHL do corp_agent_framework...")
+        whl_local = _get_wheels_whl()
         whl_name = _os.path.basename(whl_local)
 
         _step(f"Enviando {whl_name} para o Volume...")
@@ -770,6 +723,8 @@ def _deploy_framework_background(env: str, env_cfg: dict) -> None:
             catalog, schema, warehouse_id, env,
             workspace_url=env_cfg.get("workspace_url", ""),
             token=env_cfg.get("token", ""),
+            corp_client_agent_url=settings.effective_corp_client_agent_url,
+            corp_config_token=settings.corp_config_token,
         )
         notebook_dir  = "/Shared/_corp_client_agent"
         notebook_path = f"{notebook_dir}/deploy_framework_{catalog}_{env}"
@@ -1210,12 +1165,8 @@ def _deploy_domain_background(domain: str, env: str, env_cfg: dict) -> None:
         whl_name        = f"corp_agent_framework-{_CORP_WHL_VERSION}-py3-none-any.whl"
         whl_volume_path = f"/Volumes/{catalog}/{schema}/libs/{whl_name}"
 
-        if settings.local_dev:
-            _step("Build WHL (pulando — usando WHL local)...")
-            whl_local = _get_local_whl()
-        else:
-            _step("Buildando WHL do corp_agent_framework...")
-            whl_local = _build_whl()
+        _step("Localizando WHL do corp_agent_framework...")
+        whl_local = _get_wheels_whl()
         _step(f"Enviando {_os.path.basename(whl_local)} para o Volume...")
         with open(whl_local, "rb") as fh:
             sess.file_upload(whl_volume_path, fh, overwrite=True)
@@ -1229,11 +1180,8 @@ def _deploy_domain_background(domain: str, env: str, env_cfg: dict) -> None:
             catalog, schema, env, domain,
             workspace_url=env_cfg.get("workspace_url", ""),
             token=env_cfg.get("token", ""),
-            lakebase_host=settings.lakebase_host,
-            lakebase_database=settings.lakebase_database,
-            lakebase_databricks_host=settings.databricks_host,
-            lakebase_client_id=settings.databricks_client_id,
-            lakebase_client_secret=settings.databricks_client_secret,
+            corp_client_agent_url=settings.effective_corp_client_agent_url,
+            corp_config_token=settings.corp_config_token,
         )
         notebook_dir  = "/Shared/_corp_client_agent"
         notebook_path = f"{notebook_dir}/deploy_framework_{domain}_{env}"
@@ -1303,11 +1251,6 @@ class SaveDomainEnvRequest(BaseModel):
 
 @router.get("/domains")
 def list_domains():
-    if not settings.lakebase_host or not settings.databricks_client_id:
-        raise HTTPException(
-            status_code=503,
-            detail="Lakebase não configurado. Defina LAKEBASE_HOST e DATABRICKS_CLIENT_ID no .env.",
-        )
     try:
         rows = _get_all_domain_envs()
     except Exception as exc:
@@ -1340,8 +1283,6 @@ def list_domains():
 def save_domain_env(domain: str, env: str, body: SaveDomainEnvRequest):
     if env not in ENVS:
         raise HTTPException(status_code=422, detail=f"Ambiente inválido: '{env}'")
-    if not settings.lakebase_host or not settings.databricks_client_id:
-        raise HTTPException(status_code=503, detail="Lakebase não configurado.")
     from app.api import lakebase
     lakebase.execute("""
         INSERT INTO app.domain_envs (domain, env, workspace_url, token, warehouse_id, notes, updated_at)
@@ -1367,10 +1308,8 @@ def create_domain(domain: str):
     import re
     if not re.fullmatch(r"[a-z0-9][a-z0-9\-]*[a-z0-9]|[a-z0-9]", domain):
         raise HTTPException(status_code=422, detail="Nome de domínio inválido.")
-    if not settings.lakebase_host or not settings.databricks_client_id:
-        raise HTTPException(status_code=503, detail="Lakebase não configurado.")
     from app.api import lakebase
-    # Create per-domain PostgreSQL schema (idempotent)
+    # Create per-domain schema (idempotent)
     lakebase.create_domain_schema(domain)
     # Insert placeholder rows for all 3 envs so the domain appears in list_domains
     for env in ENVS:

@@ -4,3 +4,6 @@ __pycache__/
 .env
 *.egg-info/
 dist/
+local.db
+local.db-wal
+local.db-shm

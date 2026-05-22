@@ -22,11 +22,19 @@ class Settings(BaseSettings):
     framework_catalog: str = "corp_agent_framework"
     framework_schema: str = "agents"
 
-    # Lakebase (PostgreSQL) — single DB for all environments
-    lakebase_host: str = ""                          # LAKEBASE_HOST (endpoint DNS)
-    lakebase_database: str = "databricks_postgres"   # LAKEBASE_DATABASE
-    lakebase_api: str = ""                           # LAKEBASE_API (PostgREST endpoint URL, optional)
-    # Note: username is derived automatically from the OAuth token (JWT 'sub' claim)
+    # Optional Bearer token required by /api/config/* endpoints (consumed by corp-agent-framework).
+    # Leave empty to allow unauthenticated access (suitable for internal deployments).
+    corp_config_token: str = ""
+
+    # Public URL of this app — injected as CORP_CLIENT_AGENT_URL into serving endpoints at deploy time.
+    # Defaults to the first CORS origin if not explicitly set.
+    corp_client_agent_url: str = ""
+
+    @property
+    def effective_corp_client_agent_url(self) -> str:
+        if self.corp_client_agent_url:
+            return self.corp_client_agent_url
+        return self.cors_origins[0] if self.cors_origins else ""
 
     # Set to true when running locally to skip WHL rebuild if already in Volume
     local_dev: bool = False

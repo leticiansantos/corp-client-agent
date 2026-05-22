@@ -622,7 +622,7 @@ export default function Guardrails() {
                 <div className="gr-field">
                   <label className="gr-label">Ação <span className="req">*</span></label>
                   <select
-                    ref={editTarget ? firstInputRef : undefined}
+                    ref={editTarget ? (firstInputRef as unknown as React.RefObject<HTMLSelectElement>) : undefined}
                     className="gr-input"
                     value={form.action}
                     onChange={(e) => setForm({ ...form, action: e.target.value as GuardrailAction })}

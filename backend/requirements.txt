@@ -1,12 +1,10 @@
 fastapi==0.115.0
-uvicorn[standard]==0.30.6
+uvicorn[standard]>=0.31.1
 aiofiles>=23.0.0
 # corp-agent-framework installed separately via Makefile (pip install -e ../../corp-agent-framework)
 # databricks-sdk comes as a transitive dependency of corp-agent-framework
 mlflow[databricks]>=3.1.0
-pydantic-settings==2.4.0
+pydantic-settings>=2.5.2
 python-dotenv==1.0.1
 setuptools>=61.0
 wheel>=0.42.0
-psycopg[binary]>=3.0
-psycopg-pool>=3.0

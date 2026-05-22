@@ -57,8 +57,11 @@ def _get_conn() -> sqlite3.Connection:
 # ── SQL translation ────────────────────────────────────────────────────────────
 
 def _translate(sql: str) -> str:
-    # "schema".table → schema__table
-    sql = re.sub(r'"([^"]+)"\.([\w]+)', r'\1__\2', sql)
+    # "schema".table → schema__table  (quoted if name contains non-word chars, e.g. hyphens)
+    def _schema_table(m: re.Match) -> str:
+        combined = f"{m.group(1)}__{m.group(2)}"
+        return f'"{combined}"' if re.search(r'\W', combined) else combined
+    sql = re.sub(r'"([^"]+)"\.([\w]+)', _schema_table, sql)
     # app.table (unquoted) → app__table
     sql = re.sub(r'\bapp\.([\w]+)\b', r'app__\1', sql)
     # Parameters
